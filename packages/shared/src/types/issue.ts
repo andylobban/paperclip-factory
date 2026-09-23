@@ -267,6 +267,79 @@ export interface IssueBlockerDiagnosticsResponse {
   };
 }
 
+export type IssueScopeCoverageState =
+  | "uncovered"
+  | "in_progress"
+  | "covered"
+  | "not_applicable";
+
+export interface IssueScopeCoverageItem {
+  id: string;
+  companyId: string;
+  issueId: string;
+  key: string;
+  requirement: string;
+  required: boolean;
+  ownerIssueId: string | null;
+  state: IssueScopeCoverageState;
+  evidence: string | null;
+  createdByActorType: "agent" | "user";
+  createdByActorId: string;
+  updatedByActorType: "agent" | "user";
+  updatedByActorId: string;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface IssueCloseoutReview {
+  id: string;
+  companyId: string;
+  issueId: string;
+  fingerprint: string;
+  verdict: "approved" | "rejected";
+  note: string | null;
+  reviewerActorType: "agent" | "user";
+  reviewerActorId: string;
+  createdAt: Date | string;
+}
+
+export interface IssueCloseoutDescendant {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: IssueStatus;
+  depth: number;
+}
+
+export type IssueCloseoutBlockerCode =
+  | "active_descendants"
+  | "coverage_required"
+  | "coverage_incomplete"
+  | "coverage_evidence_missing"
+  | "coverage_owner_missing"
+  | "coverage_owner_not_done"
+  | "independent_review_required";
+
+export interface IssueCloseoutDiagnostics {
+  issueId: string;
+  governed: boolean;
+  broad: boolean;
+  ready: boolean;
+  fingerprint: string;
+  requiredItemCount: number;
+  coveredItemCount: number;
+  reviewRequired: boolean;
+  reviewApprovedForFingerprint: boolean;
+  blockerCodes: IssueCloseoutBlockerCode[];
+  incompleteItemKeys: string[];
+  missingEvidenceItemKeys: string[];
+  missingOwnerItemKeys: string[];
+  ownerNotDoneItemKeys: string[];
+  activeDescendants: IssueCloseoutDescendant[];
+  coverageItems: IssueScopeCoverageItem[];
+  latestReview: IssueCloseoutReview | null;
+}
+
 export type IssueWakeDiagnosticWakeFailureClass = "failed" | "cancelled" | "skipped";
 
 export interface IssueWakeDiagnosticWakeRequest {

@@ -55,6 +55,8 @@ import {
   restoreIssueDocumentRevisionSchema,
   upsertIssueFeedbackVoteSchema,
   upsertIssueWatchdogSchema,
+  upsertIssueScopeCoverageSchema,
+  createIssueCloseoutReviewSchema,
   runnerGoalActionRequestSchema,
   // Project
   createProjectSchema,
@@ -9949,6 +9951,38 @@ registerCurrentRoute({
   path: "/api/issues/{id}/diagnostics/subtree",
   tags: ["issues"],
   summary: "Get bounded subtree wake and blocker diagnostics for an issue",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/diagnostics/closeout",
+  tags: ["issues"],
+  summary: "Get scope coverage and closeout diagnostics for an issue",
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/issues/{id}/closeout/coverage",
+  tags: ["issues"],
+  summary: "Add or update durable issue scope coverage entries",
+  body: upsertIssueScopeCoverageSchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/closeout/reviews",
+  tags: ["issues"],
+  summary: "Record an independent issue closeout review",
+  body: createIssueCloseoutReviewSchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registerCurrentRoute({

@@ -836,6 +836,52 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
 
+export const issueScopeCoverageStateSchema = z.enum([
+  "uncovered",
+  "in_progress",
+  "covered",
+  "not_applicable",
+]);
+
+export const upsertIssueScopeCoverageSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            key: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+            requirement: multilineTextSchema.pipe(z.string().trim().min(1).max(2_000)),
+            required: z.boolean().optional().default(true),
+            ownerIssueId: z.string().guid().nullable(),
+            state: issueScopeCoverageStateSchema,
+            evidence: multilineTextSchema.pipe(z.string().trim().max(10_000)).optional().nullable(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(100)
+      .refine(
+        (items) => new Set(items.map((item) => item.key)).size === items.length,
+        "Coverage item keys must be unique",
+      ),
+  })
+  .strict();
+
+export type UpsertIssueScopeCoverage = z.infer<
+  typeof upsertIssueScopeCoverageSchema
+>;
+
+export const createIssueCloseoutReviewSchema = z
+  .object({
+    verdict: z.enum(["approved", "rejected"]),
+    note: multilineTextSchema.pipe(z.string().trim().min(1).max(10_000)).optional().nullable(),
+  })
+  .strict();
+
+export type CreateIssueCloseoutReview = z.infer<
+  typeof createIssueCloseoutReviewSchema
+>;
+
 export const createAcceptedPlanDecompositionSchema = z.object({
   acceptedPlanRevisionId: z.string().guid(),
   children: z.array(createChildIssueSchema).min(1).max(25),

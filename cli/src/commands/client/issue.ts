@@ -5,6 +5,7 @@ import {
   acceptIssueThreadInteractionSchema,
   cancelIssueThreadInteractionSchema,
   checkoutIssueSchema,
+  createIssueCloseoutReviewSchema,
   createChildIssueSchema,
   createIssueLabelSchema,
   createIssueSchema,
@@ -21,6 +22,7 @@ import {
   resolveIssueRecoveryActionSchema,
   restoreIssueDocumentRevisionSchema,
   updateIssueSchema,
+  upsertIssueScopeCoverageSchema,
   updateIssueWorkProductSchema,
   type Issue,
   type IssueComment,
@@ -829,6 +831,76 @@ export function registerIssueCommands(program: Command): void {
           });
           const interaction = await ctx.api.post(apiPath`/api/issues/${issueId}/interactions/${interactionId}/respond`, payload);
           printOutput(interaction, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    issue
+      .command("closeout")
+      .description("Get scope coverage and closeout diagnostics")
+      .argument("<issueId>", "Issue ID")
+      .action(async (issueId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const diagnostics = await ctx.api.get(
+            apiPath`/api/issues/${issueId}/diagnostics/closeout`,
+          );
+          printOutput(diagnostics, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    issue
+      .command("closeout:coverage")
+      .description("Add or update durable scope coverage entries")
+      .argument("<issueId>", "Issue ID")
+      .requiredOption(
+        "--payload-json <json>",
+        "UpsertIssueScopeCoverage JSON payload",
+      )
+      .action(async (issueId: string, opts: JsonPayloadOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const payload = upsertIssueScopeCoverageSchema.parse(
+            parseJson(opts.payloadJson),
+          );
+          const diagnostics = await ctx.api.put(
+            apiPath`/api/issues/${issueId}/closeout/coverage`,
+            payload,
+          );
+          printOutput(diagnostics, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    issue
+      .command("closeout:review")
+      .description("Record an independent closeout review verdict")
+      .argument("<issueId>", "Issue ID")
+      .requiredOption(
+        "--payload-json <json>",
+        "CreateIssueCloseoutReview JSON payload",
+      )
+      .action(async (issueId: string, opts: JsonPayloadOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const payload = createIssueCloseoutReviewSchema.parse(
+            parseJson(opts.payloadJson),
+          );
+          const review = await ctx.api.post(
+            apiPath`/api/issues/${issueId}/closeout/reviews`,
+            payload,
+          );
+          printOutput(review, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);
         }

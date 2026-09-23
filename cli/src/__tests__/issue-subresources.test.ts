@@ -62,6 +62,42 @@ describe("issue subresource commands", () => {
     ]);
   });
 
+  it("renders closeout diagnostics and sends typed coverage and review payloads", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["issue", "closeout", ISSUE_ID]);
+    await run([
+      "issue", "closeout:coverage", ISSUE_ID,
+      "--payload-json", JSON.stringify({
+        items: [{
+          key: "audit-1",
+          requirement: "Reconcile the first audit item",
+          ownerIssueId: ISSUE_ID,
+          state: "covered",
+          evidence: "test evidence",
+        }],
+      }),
+    ]);
+    await run([
+      "issue", "closeout:review", ISSUE_ID,
+      "--payload-json", JSON.stringify({ verdict: "approved", note: "Independent check complete." }),
+    ]);
+
+    expect(fetchMock.mock.calls.map((call) => [call[1]?.method ?? "GET", call[0]])).toEqual([
+      ["GET", `http://localhost:3100/api/issues/${ISSUE_ID}/diagnostics/closeout`],
+      ["PUT", `http://localhost:3100/api/issues/${ISSUE_ID}/closeout/coverage`],
+      ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/closeout/reviews`],
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      items: [expect.objectContaining({ key: "audit-1", state: "covered" })],
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      verdict: "approved",
+      note: "Independent check complete.",
+    });
+  });
+
   it("binds explicit uploaded attachments when adding a comment", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
     vi.stubGlobal("fetch", fetchMock);

@@ -254,6 +254,14 @@ Run-scoped write authorization is subtree-scoped: a run may mutate its checked-o
 2. **Direct-parent report comment (trust-gated).** The write boundary widens exactly one hop upward: a run checked out on a child issue may POST comments on the child's **direct parent** — comments only (no status, field, assignment, or document writes), the direct parent only (never grandparents or siblings, never lateral). This is gated per trust preset: **on** for `standard`, **off by default** for `low_trust_review` and other review-contained presets, whose input is untrusted content (diffs, external tickets) and whose report comment would be a prompt-injection carrier into higher-trust context.
 3. **Stop-only relay (fallback where the report comment is off).** For presets with direct-parent commenting disabled, the platform delivers a system-attributed relay comment to the direct parent when the child transitions into `blocked` or `cancelled` — never on `done` or `in_review`. Stopping is the event the parent must hear about; completion already has the first-class signal above. A relay is a comment, not a disposition transition, so it can never trigger another relay (depth-1 by construction), and relays dedupe per (child, target status) so status flapping cannot spam the parent.
 
+### Parent Closeout Scope
+
+Completing a child, substream, or review task is not the same as completing its parent workstream. A parent with declared closeout coverage must reconcile every required coverage entry before it can move to `done` or `cancelled`: each item must be covered, have evidence, and name a terminal owning descendant. Any active descendant also prevents terminal parent status.
+
+Use the closeout diagnostics endpoint (or `paperclip issue closeout <issueId>`) to inspect the typed blocker list. Add the durable ledger through the closeout coverage command/API; do not infer coverage from a title, description, or comments. Broad multi-item parent scope also requires an approved independent closeout review for the current ledger fingerprint. Updating scope, ownership, evidence, or descendant state changes that fingerprint and requires another review.
+
+Ordinary leaf issues remain closeable through the normal status rules. Legacy parents without declared coverage retain their existing behaviour until they are explicitly enrolled in closeout coverage.
+
 ### Review Delegation
 
 Review tasks — security reviews, code reviews, QA verdicts — must instruct the delegate to post findings on **their own review issue** and mark it `done`. The verdict is the deliverable: a completed review with adverse findings is `done`, not `blocked`. The parent's owner is engaged by `issue_blockers_resolved` (plus the direct-parent report comment where the reviewer's preset allows it) and owns any follow-up fixes.

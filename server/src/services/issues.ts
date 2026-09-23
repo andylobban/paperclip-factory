@@ -197,6 +197,7 @@ import {
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import { issueCloseoutService } from "./issue-closeout.js";
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -10854,6 +10855,10 @@ export function issueService(db: Db) {
           receiptExisting.status !== "done" &&
           receiptExisting.status !== "cancelled"
         ) {
+          await issueCloseoutService(db).assertCanClose(
+            receiptExisting.id,
+            tx,
+          );
           const activeOriginCase = await tx
             .select({
               caseId: pipelineCases.id,

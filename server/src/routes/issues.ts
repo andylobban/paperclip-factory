@@ -79,6 +79,7 @@ import {
   createDocumentAnnotationThreadSchema,
   createChildIssueSchema,
   createIssueSchema,
+  createIssueCloseoutReviewSchema,
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
   runnerGoalActionRequestSchema,
@@ -87,6 +88,7 @@ import {
   feedbackVoteValueSchema,
   upsertIssueFeedbackVoteSchema,
   upsertIssueWatchdogSchema,
+  upsertIssueScopeCoverageSchema,
   linkIssueApprovalSchema,
   issueDocumentKeySchema,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
@@ -168,6 +170,7 @@ import {
   ISSUE_LIST_MAX_LIMIT,
   issueReferenceService,
   issueService,
+  issueCloseoutService,
   type ActivityPublication,
   type IssueFilters,
   clampIssueListLimit,
@@ -3512,6 +3515,7 @@ export function issueRoutes(
 ) {
   const router = Router();
   const svc = issueService(db);
+  const closeoutSvc = issueCloseoutService(db);
   const runRedactions = createRunSecretRedactionRegistry(db);
   const access = accessService(db);
   const secretProposals = createSecretProposalsService(db);
@@ -8856,6 +8860,123 @@ export function issueRoutes(
 
     res.json(response);
   });
+
+  router.get("/issues/:id/diagnostics/closeout", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      getIssueById(req, id),
+      "Issue not found",
+    );
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    res.json(await closeoutSvc.getDiagnostics(issue.id));
+  });
+
+  router.put(
+    "/issues/:id/closeout/coverage",
+    validate(upsertIssueScopeCoverageSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const issue = await getAccessibleResource(
+        req,
+        res,
+        getIssueById(req, id),
+        "Issue not found",
+      );
+      if (!issue) return;
+      if (!(await assertIssueReadAllowed(req, res, issue))) return;
+      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+      if (
+        await assertLowTrustControlPlaneDenied(
+          req,
+          res,
+          issue.companyId,
+          issue,
+        )
+      )
+        return;
+
+      const actor = getActorInfo(req);
+      const diagnostics = await closeoutSvc.upsertCoverage(
+        issue.id,
+        req.body,
+        { type: actor.actorType, id: actor.actorId },
+      );
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.closeout_coverage_updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          itemKeys: req.body.items.map((item: { key: string }) => item.key),
+          fingerprint: diagnostics.fingerprint,
+        },
+      });
+      res.json(diagnostics);
+    },
+  );
+
+  router.post(
+    "/issues/:id/closeout/reviews",
+    validate(createIssueCloseoutReviewSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const issue = await getAccessibleResource(
+        req,
+        res,
+        getIssueById(req, id),
+        "Issue not found",
+      );
+      if (!issue) return;
+      if (!(await assertIssueReadAllowed(req, res, issue))) return;
+      if (
+        !(await assertAgentIssueMutationAllowed(req, res, issue, {
+          allowVisibleIssueWrite: true,
+        }))
+      )
+        return;
+      if (
+        await assertLowTrustControlPlaneDenied(
+          req,
+          res,
+          issue.companyId,
+          issue,
+        )
+      )
+        return;
+
+      const actor = getActorInfo(req);
+      const review = await closeoutSvc.createReview(issue.id, req.body, {
+        type: actor.actorType,
+        id: actor.actorId,
+      });
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.closeout_review_recorded",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          verdict: review.verdict,
+          fingerprint: review.fingerprint,
+        },
+      });
+      res.status(201).json(review);
+    },
+  );
 
   router.get("/issues/:id", async (req, res) => {
     const requestStartedAt = performance.now();
