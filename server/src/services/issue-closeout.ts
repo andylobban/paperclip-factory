@@ -110,6 +110,60 @@ function uniqueCodes(codes: IssueCloseoutBlockerCode[]) {
   return [...new Set(codes)];
 }
 
+/** Serialize hierarchy mutations that can change a closeout decision. */
+export async function lockIssueCloseoutGraph(
+  dbOrTx: Pick<Db, "execute">,
+  companyId: string,
+) {
+  await dbOrTx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`issue-closeout-graph:${companyId}`}, 0))`,
+  );
+}
+
+/** A governed terminal parent must be reopened before its descendants change. */
+export async function assertCloseoutAncestorsOpen(
+  dbOrTx: Pick<Db, "execute">,
+  companyId: string,
+  parentId: string | null | undefined,
+) {
+  if (!parentId) return;
+  const rows = await dbOrTx.execute(sql`
+    WITH RECURSIVE ancestors AS (
+      SELECT parent.id, parent.parent_id, parent.status, 1 AS depth
+      FROM issues parent
+      WHERE parent.company_id = ${companyId}
+        AND parent.id = ${parentId}
+      UNION ALL
+      SELECT parent.id, parent.parent_id, parent.status, ancestors.depth + 1
+      FROM issues parent
+      JOIN ancestors ON parent.id = ancestors.parent_id
+      WHERE parent.company_id = ${companyId}
+        AND ancestors.depth < 100
+    )
+    SELECT ancestor.id, ancestor.status
+    FROM ancestors ancestor
+    WHERE ancestor.status IN ('done', 'cancelled')
+      AND EXISTS (
+        SELECT 1
+        FROM issue_scope_coverage_items coverage
+        WHERE coverage.company_id = ${companyId}
+          AND coverage.issue_id = ancestor.id
+      )
+    ORDER BY ancestor.depth ASC
+    LIMIT 1
+  `);
+  const ancestor = Array.isArray(rows) ? rows[0] as Record<string, unknown> | undefined : undefined;
+  if (!ancestor) return;
+  throw conflict(
+    "Reopen the governed parent before changing its descendant scope",
+    {
+      code: "issue_closeout_parent_terminal",
+      parentIssueId: String(ancestor.id),
+      parentStatus: String(ancestor.status),
+    },
+  );
+}
+
 export function issueCloseoutService(db: Db) {
   const getDiagnostics = async (
     issueId: string,
@@ -247,6 +301,13 @@ export function issueCloseoutService(db: Db) {
       actor: CloseoutActor,
     ) =>
       db.transaction(async (tx) => {
+        const issueCompany = await tx
+          .select({ companyId: issues.companyId })
+          .from(issues)
+          .where(eq(issues.id, issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!issueCompany) throw notFound("Issue not found");
+        await lockIssueCloseoutGraph(tx, issueCompany.companyId);
         const issue = await tx
           .select()
           .from(issues)
@@ -340,6 +401,13 @@ export function issueCloseoutService(db: Db) {
       actor: CloseoutActor,
     ) =>
       db.transaction(async (tx) => {
+        const issueCompany = await tx
+          .select({ companyId: issues.companyId })
+          .from(issues)
+          .where(eq(issues.id, issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!issueCompany) throw notFound("Issue not found");
+        await lockIssueCloseoutGraph(tx, issueCompany.companyId);
         const issue = await tx
           .select()
           .from(issues)

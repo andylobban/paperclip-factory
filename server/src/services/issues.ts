@@ -197,7 +197,11 @@ import {
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
-import { issueCloseoutService } from "./issue-closeout.js";
+import {
+  assertCloseoutAncestorsOpen,
+  issueCloseoutService,
+  lockIssueCloseoutGraph,
+} from "./issue-closeout.js";
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -9744,6 +9748,14 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       const persist = async (tx: DbTransaction) => {
+        if (issueData.parentId) {
+          await lockIssueCloseoutGraph(tx, companyId);
+          await assertCloseoutAncestorsOpen(
+            tx,
+            companyId,
+            issueData.parentId,
+          );
+        }
         await assertExecutionTaskParent(tx as unknown as Db, companyId, issueData.parentId);
         if (issueData.conversationAgentId && issueData.conversationUserId) {
           const identity = `conversation:${companyId}:${issueData.conversationAgentId}:${issueData.conversationUserId}`;
@@ -10840,6 +10852,11 @@ export function issueService(db: Db) {
       }
 
       const runUpdate = async (tx: any) => {
+        const closeoutGraphMutation =
+          issueData.status !== undefined || issueData.parentId !== undefined;
+        if (closeoutGraphMutation) {
+          await lockIssueCloseoutGraph(tx, existing.companyId);
+        }
         // The receipt baseline must be read under the same row lock as the
         // write. Otherwise a concurrent update can be mistaken for a change
         // made by this request.
@@ -10850,6 +10867,25 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        const descendantStatusChanging =
+          patch.status !== undefined && patch.status !== receiptExisting.status;
+        const parentChanging =
+          issueData.parentId !== undefined &&
+          issueData.parentId !== receiptExisting.parentId;
+        if (descendantStatusChanging || parentChanging) {
+          await assertCloseoutAncestorsOpen(
+            tx,
+            receiptExisting.companyId,
+            receiptExisting.parentId,
+          );
+          if (parentChanging) {
+            await assertCloseoutAncestorsOpen(
+              tx,
+              receiptExisting.companyId,
+              issueData.parentId,
+            );
+          }
+        }
         if (
           (patch.status === "done" || patch.status === "cancelled") &&
           receiptExisting.status !== "done" &&
@@ -11292,6 +11328,19 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        const issue = await tx
+          .select({ companyId: issues.companyId, parentId: issues.parentId })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (issue?.parentId) {
+          await lockIssueCloseoutGraph(tx, issue.companyId);
+          await assertCloseoutAncestorsOpen(
+            tx,
+            issue.companyId,
+            issue.parentId,
+          );
+        }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)

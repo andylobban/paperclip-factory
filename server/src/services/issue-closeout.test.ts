@@ -222,6 +222,30 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     ).resolves.toMatchObject({ verdict: "approved", reviewerActorId: reviewerId });
     await expect(issueService(db).update(parentId, { status: "done" }))
       .resolves.toMatchObject({ id: parentId, status: "done" });
+    await expect(
+      issueService(db).update(childIds[0]!, { status: "todo" }),
+    ).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "issue_closeout_parent_terminal",
+        parentIssueId: parentId,
+        parentStatus: "done",
+      },
+    });
+    await expect(
+      issueService(db).create(companyId, {
+        title: "Late unreviewed scope",
+        status: "todo",
+        priority: "medium",
+        parentId,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "issue_closeout_parent_terminal",
+        parentIssueId: parentId,
+      },
+    });
   }, 30_000);
 
   it("invalidates an approval when the covered scope changes", async () => {
