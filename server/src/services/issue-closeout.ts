@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "@paperclipai/db";
 import {
   issueCloseoutReviews,
+  issueAttachments,
   issueScopeCoverageItems,
   issues,
 } from "@paperclipai/db";
@@ -100,7 +101,7 @@ function closeoutFingerprint(input: {
       required: item.required,
       ownerIssueId: item.ownerIssueId,
       state: item.state,
-      evidence: item.evidence,
+      evidenceAttachmentId: item.evidenceAttachmentId,
     })),
   });
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
@@ -189,6 +190,16 @@ export function issueCloseoutService(db: Db) {
         .orderBy(issueScopeCoverageItems.key),
       listDescendants(dbOrTx, issue.companyId, issue.id),
     ]);
+    const authorizedAttachmentIds = new Set(
+      (await dbOrTx
+        .select({ id: issueAttachments.id })
+        .from(issueAttachments)
+        .where(and(
+          eq(issueAttachments.companyId, issue.companyId),
+          inArray(issueAttachments.issueId, [issue.id, ...descendants.map((item) => item.id)]),
+        )))
+        .map((attachment) => attachment.id),
+    );
     const fingerprint = closeoutFingerprint({ issue, descendants, coverageItems });
     const latestReview = await dbOrTx
       .select()
@@ -212,7 +223,11 @@ export function issueCloseoutService(db: Db) {
       .filter((item) => item.state !== "covered")
       .map((item) => item.key);
     const missingEvidenceItemKeys = requiredItems
-      .filter((item) => item.state === "covered" && !item.evidence?.trim())
+      .filter(
+        (item) =>
+          item.state === "covered" &&
+          (!item.evidenceAttachmentId || !authorizedAttachmentIds.has(item.evidenceAttachmentId)),
+      )
       .map((item) => item.key);
     const missingOwnerItemKeys = requiredItems
       .filter((item) => !item.ownerIssueId)
@@ -337,11 +352,27 @@ export function issueCloseoutService(db: Db) {
               ownerIssueId: item.ownerIssueId,
             });
           }
-          if (item.state === "covered" && !item.evidence?.trim()) {
+          if (item.state === "covered" && !item.evidenceAttachmentId) {
             throw unprocessable("Covered scope items require evidence", {
               code: "issue_closeout_evidence_required",
               itemKey: item.key,
             });
+          }
+          if (item.evidenceAttachmentId) {
+            const attachment = await tx
+              .select({ issueId: issueAttachments.issueId })
+              .from(issueAttachments)
+              .where(and(
+                eq(issueAttachments.companyId, issue.companyId),
+                eq(issueAttachments.id, item.evidenceAttachmentId),
+              ))
+              .then((rows) => rows[0] ?? null);
+            if (!attachment || (attachment.issueId !== issue.id && !descendantIds.has(attachment.issueId))) {
+              throw unprocessable("Evidence must be an attachment on the parent or an owning descendant", {
+                code: "issue_closeout_evidence_not_authorized",
+                itemKey: item.key,
+              });
+            }
           }
         }
 
@@ -372,7 +403,8 @@ export function issueCloseoutService(db: Db) {
               required: item.required,
               ownerIssueId: item.ownerIssueId,
               state: item.state,
-              evidence: item.evidence?.trim() || null,
+              evidence: null,
+              evidenceAttachmentId: item.evidenceAttachmentId,
               createdByActorType: actor.type,
               createdByActorId: actor.id,
               updatedByActorType: actor.type,
@@ -385,7 +417,8 @@ export function issueCloseoutService(db: Db) {
                 required: item.required,
                 ownerIssueId: item.ownerIssueId,
                 state: item.state,
-                evidence: item.evidence?.trim() || null,
+                evidence: null,
+                evidenceAttachmentId: item.evidenceAttachmentId,
                 updatedByActorType: actor.type,
                 updatedByActorId: actor.id,
                 updatedAt: new Date(),

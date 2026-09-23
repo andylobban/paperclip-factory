@@ -854,7 +854,7 @@ export const upsertIssueScopeCoverageSchema = z
             required: z.boolean().optional().default(true),
             ownerIssueId: z.string().guid().nullable(),
             state: issueScopeCoverageStateSchema,
-            evidence: multilineTextSchema.pipe(z.string().trim().max(10_000)).optional().nullable(),
+            evidenceAttachmentId: z.string().guid().nullable(),
           })
           .strict(),
       )

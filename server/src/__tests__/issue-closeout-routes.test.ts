@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { agents, companies, createDb, issues } from "@paperclipai/db";
+import { agents, assets, companies, createDb, issueAttachments, issues } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import {
@@ -99,6 +99,22 @@ describeEmbeddedPostgres("issue closeout routes", () => {
     );
     const coverageApp = createApp(db, companyId, "scope-writer");
     const reviewApp = createApp(db, companyId, "independent-reviewer");
+    const attachmentIds = await Promise.all(childIds.map(async (issueId) => {
+      const assetId = randomUUID();
+      const attachmentId = randomUUID();
+      await db.insert(assets).values({
+        id: assetId,
+        companyId,
+        provider: "test",
+        objectKey: `evidence/${assetId}`,
+        contentType: "text/plain",
+        byteSize: 1,
+        sha256: "0".repeat(64),
+        createdByAgentId: implementerId,
+      });
+      await db.insert(issueAttachments).values({ id: attachmentId, companyId, issueId, assetId });
+      return attachmentId;
+    }));
 
     const unenrolled = await request(coverageApp).get(
       `/api/issues/${parentId}/diagnostics/closeout`,
@@ -119,7 +135,7 @@ describeEmbeddedPostgres("issue closeout routes", () => {
           requirement: `Scope item ${index + 1}`,
           ownerIssueId,
           state: "covered",
-          evidence: `Evidence ${index + 1}`,
+          evidenceAttachmentId: attachmentIds[index],
         })),
       });
     expect(coverage.status, JSON.stringify(coverage.body)).toBe(200);

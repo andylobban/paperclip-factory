@@ -25,6 +25,7 @@ export const issueScopeCoverageItems = pgTable(
     ownerIssueId: uuid("owner_issue_id"),
     state: text("state").notNull().default("uncovered"),
     evidence: text("evidence"),
+    evidenceAttachmentId: uuid("evidence_attachment_id"),
     createdByActorType: text("created_by_actor_type").notNull(),
     createdByActorId: text("created_by_actor_id").notNull(),
     updatedByActorType: text("updated_by_actor_type").notNull(),
@@ -54,6 +55,10 @@ export const issueScopeCoverageItems = pgTable(
     ownerIssueIdx: index("issue_scope_coverage_owner_issue_idx").on(
       table.companyId,
       table.ownerIssueId,
+    ),
+    evidenceAttachmentIdx: index("issue_scope_coverage_evidence_attachment_idx").on(
+      table.companyId,
+      table.evidenceAttachmentId,
     ),
     stateCheck: check(
       "issue_scope_coverage_state_check",

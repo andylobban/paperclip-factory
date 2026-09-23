@@ -283,6 +283,7 @@ export interface IssueScopeCoverageItem {
   ownerIssueId: string | null;
   state: IssueScopeCoverageState;
   evidence: string | null;
+  evidenceAttachmentId: string | null;
   createdByActorType: "agent" | "user";
   createdByActorId: string;
   updatedByActorType: "agent" | "user";

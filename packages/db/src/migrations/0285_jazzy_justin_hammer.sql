@@ -1,0 +1,2 @@
+ALTER TABLE "issue_scope_coverage_items" ADD COLUMN "evidence_attachment_id" uuid;--> statement-breakpoint
+CREATE INDEX "issue_scope_coverage_evidence_attachment_idx" ON "issue_scope_coverage_items" USING btree ("company_id","evidence_attachment_id");
