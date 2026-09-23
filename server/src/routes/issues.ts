@@ -9080,6 +9080,31 @@ export function issueRoutes(
     });
   });
 
+  // Active recovery semantics deliberately exclude settled no-replay holds. Expose those holds
+  // separately so an operator can inspect and reconcile the exact recorded execution without
+  // making a resolved action look active or enabling a blind retry.
+  router.get("/issues/:id/recovery-actions/diagnostic", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const [hold] = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.companyId, issue.companyId),
+        eq(issueRecoveryActions.sourceIssueId, issue.id),
+        eq(issueRecoveryActions.status, "resolved"),
+        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+      ))
+      .orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id))
+      .limit(1);
+    res.json({
+      action: hold ? issueRecoveryActionReadModel(hold) : null,
+      requiresExecutionReconciliation: Boolean(hold),
+    });
+  });
+
   router.post(
     "/issues/:id/recovery-actions/resolve",
     validate(resolveIssueRecoveryActionSchema),

@@ -9718,6 +9718,13 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/recovery-actions/diagnostic",
+  tags: ["issues"],
+  summary: "Inspect a settled no-replay recovery hold for an issue",
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/issues/{id}/recovery-actions/resolve",
   tags: ["issues"],

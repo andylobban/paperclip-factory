@@ -102,7 +102,18 @@ describe("issue subresource commands", () => {
       "--outcome", "restored",
       "--source-issue-status", "todo",
       "--action-id", APPROVAL_ID,
+      "--execution-run-id", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "--provider-stopped",
+      "--action-outcome", "not_performed",
+      "--outcome-evidence", "Provider log confirms no action was submitted before the stop.",
     ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[11]?.[1]?.body))).toMatchObject({
+      executionReconciliation: {
+        runId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        providerStopped: true,
+        actionOutcome: "not_performed",
+      },
+    });
 
     expect(fetchMock.mock.calls.map((call) => [call[1]?.method ?? "GET", call[0]])).toEqual([
       ["GET", `http://localhost:3100/api/issues/${ISSUE_ID}/comments?limit=10`],

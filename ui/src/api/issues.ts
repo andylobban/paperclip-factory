@@ -78,6 +78,11 @@ export type ResolveRecoveryActionResponse = {
   recoveryAction: IssueRecoveryAction;
 };
 
+export type RecoveryActionDiagnostic = {
+  action: IssueRecoveryAction | null;
+  requiresExecutionReconciliation: boolean;
+};
+
 export type IssueListFilters = {
   attention?: "blocked";
   status?: string;
@@ -285,6 +290,8 @@ export const issuesApi = {
       `/issues/${id}/recovery-actions/resolve`,
       data,
     ),
+  getRecoveryActionDiagnostic: (id: string) =>
+    api.get<RecoveryActionDiagnostic>(`/issues/${id}/recovery-actions/diagnostic`),
   previewTreeControl: (id: string, data: PreviewIssueTreeControl) =>
     api.post<IssueTreeControlPreview>(
       `/issues/${id}/tree-control/preview`,

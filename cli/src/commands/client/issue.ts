@@ -146,6 +146,10 @@ interface IssueRecoveryResolveOptions extends BaseClientOptions {
   outcome: string;
   sourceIssueStatus: string;
   resolutionNote?: string;
+  executionRunId?: string;
+  providerStopped?: boolean;
+  actionOutcome?: string;
+  outcomeEvidence?: string;
 }
 
 interface InteractionAcceptOptions extends BaseClientOptions {
@@ -526,6 +530,10 @@ export function registerIssueCommands(program: Command): void {
       .requiredOption("--source-issue-status <status>", "todo, done, or in_review for restored outcomes; blocked is only valid for blocked outcomes")
       .option("--action-id <id>", "Specific recovery action ID")
       .option("--resolution-note <text>", "Resolution note")
+      .option("--execution-run-id <id>", "Stopped provider run ID for execution reconciliation")
+      .option("--provider-stopped", "Confirm that the provider process has stopped")
+      .option("--action-outcome <outcome>", "completed, not_performed, or mixed")
+      .option("--outcome-evidence <text>", "Evidence supporting the recorded action outcome")
       .action(async (issueId: string, opts: IssueRecoveryResolveOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
@@ -534,6 +542,14 @@ export function registerIssueCommands(program: Command): void {
             outcome: opts.outcome,
             sourceIssueStatus: opts.sourceIssueStatus,
             resolutionNote: opts.resolutionNote,
+            ...(opts.executionRunId || opts.providerStopped || opts.actionOutcome || opts.outcomeEvidence
+              ? { executionReconciliation: {
+                runId: opts.executionRunId,
+                providerStopped: opts.providerStopped,
+                actionOutcome: opts.actionOutcome,
+                outcomeEvidence: opts.outcomeEvidence,
+              } }
+              : {}),
           });
           const result = await ctx.api.post(apiPath`/api/issues/${issueId}/recovery-actions/resolve`, payload);
           printOutput(result, { json: ctx.json });
