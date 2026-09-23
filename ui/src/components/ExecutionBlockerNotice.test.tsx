@@ -45,16 +45,22 @@ describe("stopped task recovery notice", () => {
   it("keeps the required next action for other reconciliation causes", async () => {
     await act(async () => root.render(<QueryClientProvider client={client}>
       <ExecutionBlockerNotice companyId="company" issueId="task" onRetried={onRetried} blocker={{
-        recoveryActionId: "recovery", runId: "failed-run", agentId: "agent", cause: "action_outcome_unknown",
+        recoveryActionId: "recovery", runId: "failed-run", agentId: "agent", cause: "ordinary_provider_failure",
         nextAction: "Verify the external action outcome before continuing.",
       }} />
     </QueryClientProvider>));
     expect(container.textContent).toContain("Verify the external action outcome before continuing.");
     expect(container.textContent).not.toContain("Automatic recovery of this task stopped.");
   });
-  it("records verified reconciliation rather than retrying the failed run", async () => {
+  it("requires explicit stop and outcome evidence before reconciling", async () => {
     vi.mocked(agentsApi.retryFailedRun).mockResolvedValue({} as never);
     await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    const submit = () => Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === "Record evidence and continue")!;
+    expect(submit().disabled).toBe(true);
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="combobox"]')!.click());
+    await act(async () => document.querySelector<HTMLElement>('[role="option"]')!.click());
     const textArea = container.querySelector<HTMLTextAreaElement>("textarea")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
@@ -62,14 +68,15 @@ describe("stopped task recovery notice", () => {
       );
       textArea.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(async () => container.querySelectorAll<HTMLButtonElement>("button")[1]!.click());
+    expect(submit().disabled).toBe(false);
+    await act(async () => submit().click());
     expect(agentsApi.retryFailedRun).not.toHaveBeenCalled();
     expect(issuesApi.resolveRecoveryAction).toHaveBeenCalled();
   });
   it("shows a failed Retry for non-reconciliation blockers and allows another attempt", async () => {
     await act(async () => root.render(<QueryClientProvider client={client}>
       <ExecutionBlockerNotice companyId="company" issueId="task" onRetried={onRetried} blocker={{
-        recoveryActionId: "recovery", runId: "failed-run", agentId: "agent", cause: "action_outcome_unknown",
+        recoveryActionId: "recovery", runId: "failed-run", agentId: "agent", cause: "ordinary_provider_failure",
         nextAction: "Verify the external action outcome before continuing.",
       }} />
     </QueryClientProvider>));
