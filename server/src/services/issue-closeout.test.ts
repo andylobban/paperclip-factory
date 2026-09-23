@@ -41,6 +41,47 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
       .resolves.toMatchObject({ id: issueId, status: "done" });
   }, 30_000);
 
+  it("does not implicitly enrol a legacy parent from descendant shape", async () => {
+    tempDb ??= await startEmbeddedPostgresTestDatabase("paperclip-closeout-");
+    const db = createDb(tempDb.connectionString);
+    const companyId = randomUUID();
+    const parentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Legacy parent closeout",
+      issuePrefix: `P${companyId.slice(0, 5).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: parentId,
+      companyId,
+      title: "Legacy parent",
+      status: "in_progress",
+      priority: "medium",
+    });
+    await db.insert(issues).values(
+      ["First child", "Second child"].map((title) => ({
+        id: randomUUID(),
+        companyId,
+        parentId,
+        title,
+        status: "done" as const,
+        priority: "medium" as const,
+      })),
+    );
+
+    await expect(issueCloseoutService(db).getDiagnostics(parentId))
+      .resolves.toMatchObject({
+        governed: false,
+        broad: false,
+        ready: true,
+        reviewRequired: false,
+        blockerCodes: [],
+      });
+    await expect(issueService(db).update(parentId, { status: "done" }))
+      .resolves.toMatchObject({ id: parentId, status: "done" });
+  }, 30_000);
+
   it("blocks the AND-517 failure mode until all nine items and independent review are current", async () => {
     tempDb ??= await startEmbeddedPostgresTestDatabase("paperclip-closeout-");
     const db = createDb(tempDb.connectionString);
@@ -103,26 +144,6 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     );
 
     const closeout = issueCloseoutService(db);
-    const missingCoverage = await closeout.getDiagnostics(parentId);
-    expect(missingCoverage).toMatchObject({
-      broad: true,
-      ready: false,
-      requiredItemCount: 0,
-      blockerCodes: expect.arrayContaining([
-        "coverage_required",
-        "independent_review_required",
-      ]),
-    });
-    await expect(issueService(db).update(parentId, { status: "cancelled" }))
-      .rejects.toMatchObject({
-        status: 409,
-        details: {
-          code: "issue_closeout_blocked",
-          diagnostics: {
-            blockerCodes: expect.arrayContaining(["coverage_required"]),
-          },
-        },
-      });
     const initialItems = Array.from({ length: 9 }, (_, index) => ({
       key: `item-${index + 1}`,
       requirement: `Audit item ${index + 1}`,
@@ -137,12 +158,23 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
       { type: "agent", id: implementerId },
     );
     expect(initial).toMatchObject({
+      governed: true,
       broad: true,
       ready: false,
       requiredItemCount: 9,
       coveredItemCount: 5,
       incompleteItemKeys: ["item-6", "item-7", "item-8", "item-9"],
     });
+    await expect(issueService(db).update(parentId, { status: "cancelled" }))
+      .rejects.toMatchObject({
+        status: 409,
+        details: {
+          code: "issue_closeout_blocked",
+          diagnostics: {
+            blockerCodes: expect.arrayContaining(["coverage_incomplete"]),
+          },
+        },
+      });
     await expect(issueService(db).update(parentId, { status: "done" }))
       .rejects.toMatchObject({
         status: 409,

@@ -171,23 +171,28 @@ export function issueCloseoutService(db: Db) {
       )
       .map((item) => item.key);
 
-    const broad = descendants.length >= 2 || requiredItems.length >= 2;
-    const governed = descendants.length > 0 || coverageItems.length > 0;
+    // Closeout governance is explicitly enrolled by declaring a durable
+    // coverage ledger. Descendant shape alone must not change the closure
+    // semantics of legacy parents during rollout.
+    const governed = coverageItems.length > 0;
+    const broad = governed && coverageItems.length >= 2;
     const reviewRequired = broad;
     const reviewApprovedForFingerprint =
       latestReview?.verdict === "approved" &&
       latestReview.fingerprint === fingerprint;
     const blockerCodes: IssueCloseoutBlockerCode[] = [];
-    if (activeDescendants.length > 0) blockerCodes.push("active_descendants");
-    if (broad && requiredItems.length === 0) blockerCodes.push("coverage_required");
-    if (incompleteItemKeys.length > 0) blockerCodes.push("coverage_incomplete");
-    if (missingEvidenceItemKeys.length > 0)
-      blockerCodes.push("coverage_evidence_missing");
-    if (missingOwnerItemKeys.length > 0) blockerCodes.push("coverage_owner_missing");
-    if (ownerNotDoneItemKeys.length > 0)
-      blockerCodes.push("coverage_owner_not_done");
-    if (reviewRequired && !reviewApprovedForFingerprint)
-      blockerCodes.push("independent_review_required");
+    if (governed) {
+      if (activeDescendants.length > 0) blockerCodes.push("active_descendants");
+      if (requiredItems.length === 0) blockerCodes.push("coverage_required");
+      if (incompleteItemKeys.length > 0) blockerCodes.push("coverage_incomplete");
+      if (missingEvidenceItemKeys.length > 0)
+        blockerCodes.push("coverage_evidence_missing");
+      if (missingOwnerItemKeys.length > 0) blockerCodes.push("coverage_owner_missing");
+      if (ownerNotDoneItemKeys.length > 0)
+        blockerCodes.push("coverage_owner_not_done");
+      if (reviewRequired && !reviewApprovedForFingerprint)
+        blockerCodes.push("independent_review_required");
+    }
 
     return {
       issueId: issue.id,

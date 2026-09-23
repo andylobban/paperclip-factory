@@ -52,7 +52,7 @@ describeEmbeddedPostgres("issue closeout routes", () => {
     await tempDb?.cleanup();
   });
 
-  it("exposes missing coverage, accepts evidence, and records a review", async () => {
+  it("shows explicit enrolment, accepts evidence, and records a review", async () => {
     const companyId = randomUUID();
     const implementerId = randomUUID();
     const parentId = randomUUID();
@@ -100,17 +100,15 @@ describeEmbeddedPostgres("issue closeout routes", () => {
     const coverageApp = createApp(db, companyId, "scope-writer");
     const reviewApp = createApp(db, companyId, "independent-reviewer");
 
-    const missing = await request(coverageApp).get(
+    const unenrolled = await request(coverageApp).get(
       `/api/issues/${parentId}/diagnostics/closeout`,
     );
-    expect(missing.status, JSON.stringify(missing.body)).toBe(200);
-    expect(missing.body).toMatchObject({
-      broad: true,
-      ready: false,
-      blockerCodes: expect.arrayContaining([
-        "coverage_required",
-        "independent_review_required",
-      ]),
+    expect(unenrolled.status, JSON.stringify(unenrolled.body)).toBe(200);
+    expect(unenrolled.body).toMatchObject({
+      governed: false,
+      broad: false,
+      ready: true,
+      blockerCodes: [],
     });
 
     const coverage = await request(coverageApp)
@@ -126,6 +124,8 @@ describeEmbeddedPostgres("issue closeout routes", () => {
       });
     expect(coverage.status, JSON.stringify(coverage.body)).toBe(200);
     expect(coverage.body).toMatchObject({
+      governed: true,
+      broad: true,
       ready: false,
       blockerCodes: ["independent_review_required"],
     });
