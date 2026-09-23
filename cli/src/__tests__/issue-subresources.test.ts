@@ -75,7 +75,7 @@ describe("issue subresource commands", () => {
           requirement: "Reconcile the first audit item",
           ownerIssueId: ISSUE_ID,
           state: "covered",
-          evidence: "test evidence",
+          evidenceAttachmentId: ATTACHMENT_ID,
         }],
       }),
     ]);
@@ -90,8 +90,15 @@ describe("issue subresource commands", () => {
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/closeout/reviews`],
     ]);
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
-      items: [expect.objectContaining({ key: "audit-1", state: "covered" })],
+      items: [expect.objectContaining({
+        key: "audit-1",
+        state: "covered",
+        evidenceAttachmentId: ATTACHMENT_ID,
+      })],
     });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).not.toHaveProperty(
+      "items.0.evidence",
+    );
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
       verdict: "approved",
       note: "Independent check complete.",

@@ -223,14 +223,12 @@ export function issueCloseoutService(db: Db) {
       .filter((item) => item.state !== "covered")
       .map((item) => item.key);
     const missingEvidenceItemKeys = requiredItems
-      .filter(
-        (item) =>
-          item.state === "covered" &&
-          (!item.evidenceAttachmentId ||
-            ![issue.id, item.ownerIssueId].includes(
-              evidenceAttachmentIssueIdById.get(item.evidenceAttachmentId) ?? null,
-            )),
-      )
+      .filter((item) => {
+        if (item.state !== "covered") return false;
+        if (!item.evidenceAttachmentId) return true;
+        const attachmentIssueId = evidenceAttachmentIssueIdById.get(item.evidenceAttachmentId);
+        return attachmentIssueId !== issue.id && attachmentIssueId !== item.ownerIssueId;
+      })
       .map((item) => item.key);
     const missingOwnerItemKeys = requiredItems
       .filter((item) => !item.ownerIssueId)
