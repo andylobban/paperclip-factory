@@ -86,7 +86,9 @@ export function ExecutionBlockerNotice({ companyId, issueId, blocker, onRetried 
   );
   return (
     <div role="status" aria-label="Task recovery" className="mx-(--sz-execution-blocker-inline) my-(--sz-execution-blocker-block) flex flex-wrap items-center justify-between execution-blocker-notice border border-border bg-muted text-foreground">
-      <span>{reconciliationRequired ? "Automatic recovery of this task stopped." : blocker.nextAction}</span>
+      <span>{reconciliationRequired
+        ? "Automatic recovery of this task stopped. The stopped run was not replayed. A fresh continuation may start after reconciliation."
+        : blocker.nextAction}</span>
       {reconciliationRequired ? (
         <Button variant="outline" size="sm" disabled={diagnostic.isFetching} onClick={() => setInspectOpen(true)}>
           {diagnostic.isFetching ? "Inspecting…" : "Inspect & reconcile"}

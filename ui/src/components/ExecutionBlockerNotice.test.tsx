@@ -42,6 +42,12 @@ describe("stopped task recovery notice", () => {
     expect(notice.classList.contains("bg-muted")).toBe(true);
     expect(notice.querySelector("a")).toBeNull();
   });
+  it("explains that reconciliation did not replay the stopped action and a fresh continuation may start", () => {
+    const notice = container.querySelector('[role="status"][aria-label="Task recovery"]')!;
+    expect(notice.textContent).toContain("The stopped run was not replayed.");
+    expect(notice.textContent).toContain("A fresh continuation may start after reconciliation.");
+    expect(notice.textContent).not.toContain("No future provider execution can occur.");
+  });
   it("keeps the required next action for other reconciliation causes", async () => {
     await act(async () => root.render(<QueryClientProvider client={client}>
       <ExecutionBlockerNotice companyId="company" issueId="task" onRetried={onRetried} blocker={{
