@@ -36,7 +36,8 @@ describe("stopped task recovery notice", () => {
   afterEach(async () => { await act(async () => root.unmount()); client.clear(); container.remove(); });
   it("shows an inspect-and-reconcile action instead of blind Retry", () => {
     const notice = container.querySelector('[role="status"][aria-label="Task recovery"]')!;
-    expect(notice.textContent).toContain("Automatic recovery of this task stopped.Inspect & reconcile");
+    expect(notice.textContent).toContain("Automatic recovery of this task stopped.");
+    expect(notice.textContent).toContain("Inspect & reconcile");
     expect(notice.textContent).not.toContain("Retry");
     expect(notice.classList.contains("border")).toBe(true);
     expect(notice.classList.contains("bg-muted")).toBe(true);
