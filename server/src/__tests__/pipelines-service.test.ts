@@ -34,6 +34,7 @@ import {
   pipelineService,
   type PipelineActor,
 } from "../services/pipelines.ts";
+import { issueService } from "../services/issues.ts";
 import { routineService } from "../services/routines.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -280,6 +281,113 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(batch.filter((item) => item.ok && item.created)).toHaveLength(3);
     const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(pipelineCases);
     expect(count).toBe(5);
+  });
+
+  it("atomically links an origin issue and blocks issue closeout until the case is terminal", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const [originIssue] = await db.insert(issues).values({
+      companyId: company.id,
+      title: "Factory-controlled change",
+      status: "todo",
+      priority: "high",
+    }).returning();
+
+    const first = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: `issue:${originIssue!.id}`,
+      originIssueId: originIssue!.id,
+      title: originIssue!.title,
+      actor: userActor,
+    });
+    const retry = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: `issue:${originIssue!.id}`,
+      originIssueId: originIssue!.id,
+      title: "Retry title is ignored",
+      actor: userActor,
+    });
+
+    expect(first).toMatchObject({
+      created: true,
+      originIssueLink: { issueId: originIssue!.id, role: "origin" },
+    });
+    expect(retry).toMatchObject({
+      created: false,
+      case: { id: first.case.id },
+      originIssueLink: { issueId: originIssue!.id, role: "origin" },
+    });
+    expect(await db.select().from(pipelineCaseIssueLinks)).toHaveLength(1);
+    expect(await eventCount(first.case.id)).toBe(2);
+
+    await expect(
+      issueService(db).update(originIssue!.id, { status: "done" }),
+    ).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "pipeline_case_active",
+        caseId: first.case.id,
+        pipelineKey: pipeline.key,
+        stageKey: "intake",
+      },
+    });
+
+    await svc.transitionCase({
+      companyId: company.id,
+      caseId: first.case.id,
+      toStageKey: "done",
+      expectedVersion: first.case.version,
+      actor: userActor,
+    });
+    await expect(
+      issueService(db).update(originIssue!.id, { status: "done" }),
+    ).resolves.toMatchObject({ status: "done" });
+  });
+
+  it("rejects conflicting or cross-company origin issue enrolment without creating a case", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const [firstIssue, secondIssue] = await db.insert(issues).values([
+      { companyId: company.id, title: "First origin", status: "todo", priority: "medium" },
+      { companyId: company.id, title: "Second origin", status: "todo", priority: "medium" },
+    ]).returning();
+    const enrolled = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "single-origin",
+      originIssueId: firstIssue!.id,
+      title: "Single origin",
+      actor: userActor,
+    });
+
+    await expect(svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "single-origin",
+      originIssueId: secondIssue!.id,
+      title: "Conflicting retry",
+      actor: userActor,
+    })).rejects.toMatchObject({ status: 409, details: { code: "origin_issue_conflict" } });
+
+    const otherCompany = await seedCompany();
+    const [foreignIssue] = await db.insert(issues).values({
+      companyId: otherCompany.id,
+      title: "Foreign origin",
+      status: "todo",
+      priority: "medium",
+    }).returning();
+    await expect(svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "foreign-origin",
+      originIssueId: foreignIssue!.id,
+      title: "Foreign origin",
+      actor: userActor,
+    })).rejects.toMatchObject({ status: 422, details: { code: "origin_issue_not_found" } });
+
+    const cases = await db.select().from(pipelineCases);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]!.id).toBe(enrolled.case.id);
   });
 
   it("persists workspaceRef during ingest", async () => {

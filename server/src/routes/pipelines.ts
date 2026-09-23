@@ -1356,6 +1356,14 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     const pipelineId = req.params.pipelineId as string;
     const companyId = await assertPipelineAccess(db, req, pipelineId);
     await assertPipelineWriteAccess(req, { access, companyId, pipelineId });
+    if (req.body.originIssueId) {
+      const targetIssue = await getIssueMutationTarget(db, {
+        companyId,
+        issueId: req.body.originIssueId,
+      });
+      if (!targetIssue) throw notFound("Issue not found");
+      await assertIssueLinkMutationAllowed(req, { access, issuesSvc, issue: targetIssue });
+    }
     const actor = actorForMutation(req);
     const result = await svc.ingestCase({ companyId, pipelineId, ...req.body, actor });
     res.status(result.created ? 201 : 200).json(result);
@@ -1365,6 +1373,15 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     const pipelineId = req.params.pipelineId as string;
     const companyId = await assertPipelineAccess(db, req, pipelineId);
     await assertPipelineWriteAccess(req, { access, companyId, pipelineId });
+    const originIssueIds = [...new Set<string>(
+      (req.body.items as Array<{ originIssueId?: string }>).flatMap((item) =>
+        item.originIssueId ? [item.originIssueId] : []),
+    )];
+    for (const issueId of originIssueIds) {
+      const targetIssue = await getIssueMutationTarget(db, { companyId, issueId });
+      if (!targetIssue) throw notFound("Issue not found");
+      await assertIssueLinkMutationAllowed(req, { access, issuesSvc, issue: targetIssue });
+    }
     const actor = actorForMutation(req);
     res.json(await svc.ingestCases({ companyId, pipelineId, items: req.body.items, actor }));
   });

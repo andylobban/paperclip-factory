@@ -119,6 +119,35 @@ describe("pipeline CLI commands", () => {
       ],
     });
   });
+
+  it("atomically enrols an origin issue during case ingest", async () => {
+    const pipelineId = "33333333-3333-4333-8333-333333333333";
+    const issueId = "44444444-4444-4444-8444-444444444444";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([{ id: pipelineId, key: "software-delivery", name: "Software delivery" }]))
+      .mockResolvedValueOnce(jsonResponse({ case: { id: CASE_ID }, created: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run([
+      "pipelines",
+      "ingest",
+      "software-delivery",
+      "--case-key",
+      `issue:${issueId}`,
+      "--origin-issue",
+      issueId,
+      "--title",
+      "Factory-controlled change",
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`http://localhost:3100/api/pipelines/${pipelineId}/cases`);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      caseKey: `issue:${issueId}`,
+      originIssueId: issueId,
+      title: "Factory-controlled change",
+    });
+  });
 });
 
 function jsonResponse(body: unknown = { ok: true }, init: ResponseInit = { status: 200 }): Response {

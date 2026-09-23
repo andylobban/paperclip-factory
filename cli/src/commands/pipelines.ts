@@ -101,6 +101,7 @@ interface AutomationOptions extends PipelineOptions {
 
 interface IngestOptions extends PipelineOptions {
   caseKey?: string;
+  originIssue?: string;
   title: string;
   summary?: string;
   fieldsJson?: string;
@@ -329,6 +330,7 @@ export function registerPipelineCommands(program: Command): void {
       .description("Ingest one case into a pipeline")
       .argument("<pipeline>", "Pipeline ID or key")
       .option("--case-key <key>", "Case idempotency key")
+      .option("--origin-issue <id>", "Issue UUID to link as the case origin")
       .requiredOption("--title <title>", "Case title")
       .option("--summary <text>", "Case summary")
       .option("--fields-json <json>", "Case fields JSON object")
@@ -658,6 +660,7 @@ async function getPipeline(ctx: ResolvedClientContext & { companyId: string }, p
 async function buildIngestBody(opts: IngestOptions): Promise<JsonObject> {
   const body: JsonObject = { title: opts.title };
   setIfDefined(body, "caseKey", opts.caseKey);
+  setIfDefined(body, "originIssueId", opts.originIssue);
   setIfDefined(body, "summary", opts.summary);
   setIfDefined(body, "stageKey", opts.stage);
   setIfDefined(body, "parentCaseId", opts.parentCase);
