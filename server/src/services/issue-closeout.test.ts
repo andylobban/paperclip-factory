@@ -340,6 +340,11 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
       })),
     );
     const closeout = issueCloseoutService(db);
+    const parentEvidenceAttachmentId = await createEvidenceAttachment(db, {
+      companyId,
+      issueId: parentId,
+      createdByAgentId: implementerId,
+    });
     const evidenceAttachmentIds = await Promise.all(
       childIds.map((issueId) => createEvidenceAttachment(db, {
         companyId,
@@ -363,7 +368,7 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     );
     await closeout.upsertCoverage(
       parentId,
-      { items: [{ ...coverage[0]!, evidenceAttachmentId: evidenceAttachmentIds[1]! }] },
+      { items: [{ ...coverage[0]!, evidenceAttachmentId: parentEvidenceAttachmentId }] },
       { type: "agent", id: implementerId },
     );
     const diagnostics = await closeout.getDiagnostics(parentId);
@@ -372,7 +377,7 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     expect(diagnostics.blockerCodes).toContain("independent_review_required");
   }, 30_000);
 
-  it("accepts only live parent-or-descendant evidence attachments", async () => {
+  it("accepts only live parent-or-declared-owner evidence attachments", async () => {
     tempDb ??= await startEmbeddedPostgresTestDatabase("paperclip-closeout-");
     const db = createDb(tempDb.connectionString);
     const companyId = randomUUID();
@@ -380,6 +385,7 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     const implementerId = randomUUID();
     const parentId = randomUUID();
     const childId = randomUUID();
+    const siblingId = randomUUID();
     const unrelatedId = randomUUID();
     const otherIssueId = randomUUID();
     await db.insert(companies).values([
@@ -400,12 +406,14 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
     await db.insert(issues).values([
       { id: parentId, companyId, title: "Evidence parent", status: "in_progress", priority: "high", assigneeAgentId: implementerId, createdByAgentId: implementerId },
       { id: childId, companyId, parentId, title: "Evidence child", status: "done", priority: "medium", assigneeAgentId: implementerId },
+      { id: siblingId, companyId, parentId, title: "Evidence sibling", status: "done", priority: "medium", assigneeAgentId: implementerId },
       { id: unrelatedId, companyId, title: "Unrelated issue", status: "done", priority: "medium", assigneeAgentId: implementerId },
       { id: otherIssueId, companyId: otherCompanyId, title: "Other company issue", status: "done", priority: "medium" },
     ]);
     const closeout = issueCloseoutService(db);
     const parentAttachmentId = await createEvidenceAttachment(db, { companyId, issueId: parentId, createdByAgentId: implementerId });
     const childAttachmentId = await createEvidenceAttachment(db, { companyId, issueId: childId, createdByAgentId: implementerId });
+    const siblingAttachmentId = await createEvidenceAttachment(db, { companyId, issueId: siblingId, createdByAgentId: implementerId });
     const unrelatedAttachmentId = await createEvidenceAttachment(db, { companyId, issueId: unrelatedId, createdByAgentId: implementerId });
     const otherCompanyAttachmentId = await createEvidenceAttachment(db, { companyId: otherCompanyId, issueId: otherIssueId, createdByAgentId: implementerId });
     const actor = { type: "agent" as const, id: implementerId };
@@ -415,12 +423,31 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
       .resolves.toMatchObject({ ready: true, missingEvidenceItemKeys: [] });
     await expect(closeout.upsertCoverage(parentId, { items: [{ ...item, evidenceAttachmentId: childAttachmentId }] }, actor))
       .resolves.toMatchObject({ ready: true, missingEvidenceItemKeys: [] });
+    await expect(closeout.upsertCoverage(parentId, { items: [{ ...item, evidenceAttachmentId: siblingAttachmentId }] }, actor))
+      .rejects.toMatchObject({ status: 422, details: { code: "issue_closeout_evidence_not_authorized" } });
     await expect(closeout.upsertCoverage(parentId, { items: [{ ...item, evidence: "legacy text" } as any] }, actor))
       .rejects.toMatchObject({ status: 422, details: { code: "issue_closeout_evidence_required" } });
     await expect(closeout.upsertCoverage(parentId, { items: [{ ...item, evidenceAttachmentId: unrelatedAttachmentId }] }, actor))
       .rejects.toMatchObject({ status: 422, details: { code: "issue_closeout_evidence_not_authorized" } });
     await expect(closeout.upsertCoverage(parentId, { items: [{ ...item, evidenceAttachmentId: otherCompanyAttachmentId }] }, actor))
       .rejects.toMatchObject({ status: 422, details: { code: "issue_closeout_evidence_not_authorized" } });
+
+    await db.update(issueAttachments)
+      .set({ issueId: siblingId })
+      .where(eq(issueAttachments.id, childAttachmentId));
+    await expect(closeout.getDiagnostics(parentId)).resolves.toMatchObject({
+      ready: false,
+      missingEvidenceItemKeys: ["evidence"],
+      blockerCodes: expect.arrayContaining(["coverage_evidence_missing"]),
+    });
+
+    await db.update(issueAttachments)
+      .set({ issueId: childId })
+      .where(eq(issueAttachments.id, childAttachmentId));
+    await expect(closeout.getDiagnostics(parentId)).resolves.toMatchObject({
+      ready: true,
+      missingEvidenceItemKeys: [],
+    });
 
     await db.delete(issueAttachments).where(eq(issueAttachments.id, childAttachmentId));
     await expect(closeout.getDiagnostics(parentId)).resolves.toMatchObject({

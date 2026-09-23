@@ -190,15 +190,15 @@ export function issueCloseoutService(db: Db) {
         .orderBy(issueScopeCoverageItems.key),
       listDescendants(dbOrTx, issue.companyId, issue.id),
     ]);
-    const authorizedAttachmentIds = new Set(
+    const evidenceAttachmentIssueIdById = new Map(
       (await dbOrTx
-        .select({ id: issueAttachments.id })
+        .select({ id: issueAttachments.id, issueId: issueAttachments.issueId })
         .from(issueAttachments)
         .where(and(
           eq(issueAttachments.companyId, issue.companyId),
           inArray(issueAttachments.issueId, [issue.id, ...descendants.map((item) => item.id)]),
         )))
-        .map((attachment) => attachment.id),
+        .map((attachment) => [attachment.id, attachment.issueId]),
     );
     const fingerprint = closeoutFingerprint({ issue, descendants, coverageItems });
     const latestReview = await dbOrTx
@@ -226,7 +226,10 @@ export function issueCloseoutService(db: Db) {
       .filter(
         (item) =>
           item.state === "covered" &&
-          (!item.evidenceAttachmentId || !authorizedAttachmentIds.has(item.evidenceAttachmentId)),
+          (!item.evidenceAttachmentId ||
+            ![issue.id, item.ownerIssueId].includes(
+              evidenceAttachmentIssueIdById.get(item.evidenceAttachmentId) ?? null,
+            )),
       )
       .map((item) => item.key);
     const missingOwnerItemKeys = requiredItems
@@ -367,8 +370,8 @@ export function issueCloseoutService(db: Db) {
                 eq(issueAttachments.id, item.evidenceAttachmentId),
               ))
               .then((rows) => rows[0] ?? null);
-            if (!attachment || (attachment.issueId !== issue.id && !descendantIds.has(attachment.issueId))) {
-              throw unprocessable("Evidence must be an attachment on the parent or an owning descendant", {
+            if (!attachment || (attachment.issueId !== issue.id && attachment.issueId !== item.ownerIssueId)) {
+              throw unprocessable("Evidence must be an attachment on the parent or the item's declared owner", {
                 code: "issue_closeout_evidence_not_authorized",
                 itemKey: item.key,
               });
