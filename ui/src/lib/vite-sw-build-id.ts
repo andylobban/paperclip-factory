@@ -56,12 +56,15 @@ export function serviceWorkerBuildIdPlugin(
   const serviceWorkerFileName = options.serviceWorkerFileName ?? "sw.js";
   let buildId: string | null = null;
   let outDir = "dist";
+  let publicDir = "public";
+  let stamped = false;
 
   return {
     name: "paperclip-sw-build-id",
     apply: "build",
     configResolved(config) {
       outDir = config.build.outDir;
+      publicDir = config.publicDir;
     },
     generateBundle(_options, bundle) {
       const entry = Object.values(bundle).find(
@@ -72,10 +75,18 @@ export function serviceWorkerBuildIdPlugin(
       }
     },
     closeBundle() {
+      if (stamped) return;
       const swPath = path.resolve(outDir, serviceWorkerFileName);
-      const source = fs.readFileSync(swPath, "utf8");
-      const stamped = stampServiceWorkerBuildId(source, buildId ?? "build");
-      fs.writeFileSync(swPath, stamped);
+      const publicSwPath = path.resolve(publicDir, serviceWorkerFileName);
+      const source = fs.readFileSync(publicSwPath, "utf8");
+      const stampedSource = stampServiceWorkerBuildId(source, buildId ?? "build");
+      if (fs.existsSync(swPath) && fs.readFileSync(swPath, "utf8") === stampedSource) {
+        stamped = true;
+        return;
+      }
+      fs.mkdirSync(path.dirname(swPath), { recursive: true });
+      fs.writeFileSync(swPath, stampedSource);
+      stamped = true;
     },
   };
 }
