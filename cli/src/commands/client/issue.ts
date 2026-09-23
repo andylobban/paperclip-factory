@@ -24,6 +24,7 @@ import {
   updateIssueWorkProductSchema,
   type Issue,
   type IssueComment,
+  type ResolveIssueRecoveryActionResponse,
   upsertIssueDocumentSchema,
   upsertIssueFeedbackVoteSchema,
 } from "@paperclipai/shared";
@@ -551,7 +552,10 @@ export function registerIssueCommands(program: Command): void {
               } }
               : {}),
           });
-          const result = await ctx.api.post(apiPath`/api/issues/${issueId}/recovery-actions/resolve`, payload);
+          const result = await ctx.api.post<ResolveIssueRecoveryActionResponse>(
+            apiPath`/api/issues/${issueId}/recovery-actions/resolve`,
+            payload,
+          );
           printOutput(result, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);

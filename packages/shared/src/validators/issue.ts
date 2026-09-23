@@ -548,6 +548,24 @@ export type IssueRecoveryActionReadModel = z.infer<
   typeof issueRecoveryActionReadModelSchema
 >;
 
+export const executionReconciliationResultSchema = z
+  .object({
+    disposition: z.enum([
+      "accepted",
+      "verified_no_op",
+      "idempotent_repeat",
+    ]),
+    actionOutcome: z.enum(["completed", "not_performed", "mixed"]),
+    continuationDelivery: z.enum([
+      "pending",
+      "delegated",
+      "delivered",
+      "invalidated",
+    ]),
+    replayStarted: z.literal(false),
+  })
+  .strict();
+
 const RESOLVE_ISSUE_RECOVERY_ACTION_OUTCOMES = [
   "restored",
   "false_positive",

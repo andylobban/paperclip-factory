@@ -432,6 +432,7 @@ export {
   issueExecutionPolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,
+  executionReconciliationResultSchema,
   resolveIssueRecoveryActionSchema,
   issueReviewRequestSchema,
   issueExecutionWorkspaceSettingsSchema,

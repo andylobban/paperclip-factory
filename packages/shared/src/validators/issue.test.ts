@@ -3,6 +3,7 @@ import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
   createIssueSchema,
+  executionReconciliationResultSchema,
   issueBlockedInboxAttentionSchema,
   resolveIssueRecoveryActionSchema,
   respondIssueThreadInteractionSchema,
@@ -291,6 +292,30 @@ describe("issue validators", () => {
       resolveIssueRecoveryActionSchema.safeParse({
         outcome: "false_positive",
         sourceIssueStatus: "todo",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates typed stopped-execution reconciliation receipts", () => {
+    expect(
+      executionReconciliationResultSchema.parse({
+        disposition: "idempotent_repeat",
+        actionOutcome: "mixed",
+        continuationDelivery: "delivered",
+        replayStarted: false,
+      }),
+    ).toEqual({
+      disposition: "idempotent_repeat",
+      actionOutcome: "mixed",
+      continuationDelivery: "delivered",
+      replayStarted: false,
+    });
+    expect(
+      executionReconciliationResultSchema.safeParse({
+        disposition: "accepted",
+        actionOutcome: "completed",
+        continuationDelivery: "pending",
+        replayStarted: true,
       }).success,
     ).toBe(false);
   });

@@ -1,4 +1,8 @@
-import type { ExecutionProjection, ExecutionBlocker } from "./execution-projection.js";
+import type {
+  ExecutionProjection,
+  ExecutionBlocker,
+  ExecutionReconciliationResult,
+} from "./execution-projection.js";
 import type {
   IssueCommentAuthorType,
   IssueCommentMetadataRowType,
@@ -564,6 +568,12 @@ export interface IssueRecoveryAction {
   resolvedAt: Date | string | null;
   createdAt: Date | string;
   updatedAt: Date | string;
+}
+
+export interface ResolveIssueRecoveryActionResponse {
+  issue: Issue;
+  recoveryAction: IssueRecoveryAction;
+  executionReconciliationResult?: ExecutionReconciliationResult;
 }
 
 export type SuccessfulRunHandoffStateKind = "required" | "resolved" | "escalated";

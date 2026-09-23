@@ -1633,7 +1633,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("accepts new verified evidence after an automatic no-replay disposition without reopening on duplicate requests", async () => {
+  async function seedAutomaticNoReplayHold() {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
     await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
@@ -1644,6 +1644,52 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       nextAction: "Preserve recorded work without replay.",
       evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
     }).returning();
+    return { companyId, coderId, sourceIssueId, runId, action: action! };
+  }
+
+  it.each([
+    ["completed", "accepted"],
+    ["mixed", "accepted"],
+    ["not_performed", "verified_no_op"],
+  ] as const)(
+    "returns a typed %s stopped-execution reconciliation receipt without replaying the run",
+    async (actionOutcome, disposition) => {
+      const { sourceIssueId, runId, action } =
+        await seedAutomaticNoReplayHold();
+      const app = createApp();
+      const beforeRuns = await db.select().from(heartbeatRuns);
+      const response = await request(app)
+        .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+        .send({
+          actionId: action.id,
+          outcome: "restored",
+          sourceIssueStatus: "todo",
+          executionReconciliation: {
+            runId,
+            providerStopped: true,
+            actionOutcome,
+            outcomeEvidence:
+              "Provider receipts classify the stopped action without replaying the original execution.",
+          },
+        })
+        .expect(200);
+
+      expect(response.body.executionReconciliationResult).toEqual({
+        disposition,
+        actionOutcome,
+        continuationDelivery: "pending",
+        replayStarted: false,
+      });
+      expect(response.body.issue.status).toBe("todo");
+      expect(await db.select().from(heartbeatRuns)).toEqual(beforeRuns);
+      expect(
+        (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0],
+      ).toMatchObject({ id: runId, status: "failed" });
+    },
+  );
+
+  it("returns an idempotent receipt for identical evidence and rejects differing evidence without side effects", async () => {
+    const { sourceIssueId, runId, action } = await seedAutomaticNoReplayHold();
     const app = createApp();
     const body = { actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
       executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
@@ -1656,8 +1702,102 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
     expect(recorded!.evidence).not.toHaveProperty("automaticRecovery");
     expect(recorded!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
-    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(resolved.body.executionReconciliationResult).toEqual({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      continuationDelivery: "pending",
+      replayStarted: false,
+    });
+    const beforeRepeat = {
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0],
+      activities: await db.select().from(activityLog),
+      runs: await db.select().from(heartbeatRuns),
+      wakes: await db.select().from(agentWakeupRequests),
+    };
+    const repeated = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(repeated.body.executionReconciliationResult).toEqual({
+      disposition: "idempotent_repeat",
+      actionOutcome: "not_performed",
+      continuationDelivery: "pending",
+      replayStarted: false,
+    });
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(beforeRepeat.issue);
+    expect(await db.select().from(activityLog)).toEqual(beforeRepeat.activities);
+    expect(await db.select().from(heartbeatRuns)).toEqual(beforeRepeat.runs);
+    expect(await db.select().from(agentWakeupRequests)).toEqual(beforeRepeat.wakes);
+
+    for (const executionReconciliation of [
+      { ...body.executionReconciliation, runId: randomUUID() },
+      { ...body.executionReconciliation, actionOutcome: "mixed" },
+      {
+        ...body.executionReconciliation,
+        outcomeEvidence:
+          "Later evidence claims a different external outcome and must never overwrite the first decision.",
+      },
+    ]) {
+      const conflictResponse = await request(app)
+        .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+        .send({ ...body, executionReconciliation })
+        .expect(409);
+      expect(conflictResponse.body.code).toBe(
+        "execution_reconciliation_conflict",
+      );
+    }
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(recorded);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(beforeRepeat.issue);
+    expect(await db.select().from(activityLog)).toEqual(beforeRepeat.activities);
+    expect(await db.select().from(heartbeatRuns)).toEqual(beforeRepeat.runs);
+    expect(await db.select().from(agentWakeupRequests)).toEqual(beforeRepeat.wakes);
+  });
+
+  it("rejects malformed and mismatched reconciliation evidence without mutating the hold", async () => {
+    const { sourceIssueId, runId, action } = await seedAutomaticNoReplayHold();
+    const app = createApp();
+    const before = {
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0],
+      action: (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0],
+      runs: await db.select().from(heartbeatRuns),
+      wakes: await db.select().from(agentWakeupRequests),
+    };
+    const base = {
+      actionId: action.id,
+      outcome: "restored",
+      sourceIssueStatus: "todo",
+      executionReconciliation: {
+        runId,
+        providerStopped: true,
+        actionOutcome: "completed",
+        outcomeEvidence:
+          "Provider receipts confirm the stopped action outcome and process termination.",
+      },
+    };
+
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        ...base,
+        executionReconciliation: {
+          ...base.executionReconciliation,
+          outcomeEvidence: "too short",
+        },
+      })
+      .expect(400);
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        ...base,
+        executionReconciliation: {
+          ...base.executionReconciliation,
+          runId: randomUUID(),
+        },
+      })
+      .expect(409);
+
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before.issue);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(before.action);
+    expect(await db.select().from(heartbeatRuns)).toEqual(before.runs);
+    expect(await db.select().from(agentWakeupRequests)).toEqual(before.wakes);
   });
 
   it("exposes a resolved no-replay hold through a typed diagnostic without changing active recovery reads", async () => {

@@ -257,6 +257,30 @@ describe("openapi routes", () => {
     expect(wake.responses["409"]).toBeDefined();
     expect(wake.description).toContain("durable queued/deferred receipt");
   });
+
+  it("documents typed execution reconciliation receipts and conflicting repeats", async () => {
+    const res = await request(createApp()).get("/api/openapi.json");
+    const resolve =
+      res.body.paths["/api/issues/{id}/recovery-actions/resolve"].post;
+    const success = resolve.responses["200"].content["application/json"].schema;
+
+    expect(resolve.responses["409"]).toBeDefined();
+    expect(success.properties.executionReconciliationResult.properties).toMatchObject({
+      disposition: {
+        type: "string",
+        enum: ["accepted", "verified_no_op", "idempotent_repeat"],
+      },
+      actionOutcome: {
+        type: "string",
+        enum: ["completed", "not_performed", "mixed"],
+      },
+      continuationDelivery: {
+        type: "string",
+        enum: ["pending", "delegated", "delivered", "invalidated"],
+      },
+      replayStarted: { type: "boolean", enum: [false] },
+    });
+  });
   it("serves the generated OpenAPI document", async () => {
     const res = await request(createApp()).get("/api/openapi.json");
 
