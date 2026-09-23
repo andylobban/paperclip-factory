@@ -1660,6 +1660,25 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  it("exposes a resolved no-replay hold through a typed diagnostic without changing active recovery reads", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: coderId, cause: "uncertain_external_action", fingerprint: runId,
+      nextAction: "Verify the stopped provider and record its action outcome before continuing.",
+      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }).returning();
+    const app = createApp();
+
+    await expect(request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`)).resolves.toMatchObject({ body: { active: null, actions: [] } });
+    const diagnostic = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions/diagnostic`).expect(200);
+    expect(diagnostic.body).toMatchObject({
+      requiresExecutionReconciliation: true,
+      action: { id: action!.id, status: "resolved", outcome: "blocked", nextAction: action!.nextAction },
+    });
+  });
+
   async function seedReconciledDelivery() {
     const fixture = await seedCompany();
     const { companyId, coderId, sourceIssueId } = fixture;
