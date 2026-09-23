@@ -63,6 +63,10 @@ import {
   issueWorkProducts,
   issueReadStates,
   issueThreadInteractions,
+  pipelineCaseIssueLinks,
+  pipelineCases,
+  pipelineStages,
+  pipelines,
   toolActionRequests,
   toolActionDeliveries,
   toolInvocations,
@@ -10845,6 +10849,51 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (
+          (patch.status === "done" || patch.status === "cancelled") &&
+          receiptExisting.status !== "done" &&
+          receiptExisting.status !== "cancelled"
+        ) {
+          const activeOriginCase = await tx
+            .select({
+              caseId: pipelineCases.id,
+              caseKey: pipelineCases.caseKey,
+              pipelineId: pipelines.id,
+              pipelineKey: pipelines.key,
+              stageKey: pipelineStages.key,
+            })
+            .from(pipelineCaseIssueLinks)
+            .innerJoin(pipelineCases, eq(pipelineCaseIssueLinks.caseId, pipelineCases.id))
+            .innerJoin(pipelines, eq(pipelineCases.pipelineId, pipelines.id))
+            .innerJoin(pipelineStages, eq(pipelineCases.stageId, pipelineStages.id))
+            .where(and(
+              eq(pipelineCaseIssueLinks.companyId, receiptExisting.companyId),
+              eq(pipelineCaseIssueLinks.issueId, receiptExisting.id),
+              eq(pipelineCaseIssueLinks.role, "origin"),
+              isNull(pipelineCaseIssueLinks.retiredAt),
+              eq(pipelineCases.companyId, receiptExisting.companyId),
+              isNull(pipelineCases.terminalKind),
+              isNull(pipelineCases.retiredAt),
+            ))
+            .for("update")
+            .limit(1)
+            .then((rows: Array<{
+              caseId: string;
+              caseKey: string;
+              pipelineId: string;
+              pipelineKey: string;
+              stageKey: string;
+            }>) => rows[0] ?? null);
+          if (activeOriginCase) {
+            throw conflict(
+              "Issue cannot close while its origin pipeline case is active",
+              {
+                code: "pipeline_case_active",
+                ...activeOriginCase,
+              },
+            );
+          }
+        }
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });

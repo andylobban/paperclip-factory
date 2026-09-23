@@ -15,6 +15,7 @@ export const casePatchSchema = z.object({
 });
 export const ingestCaseSchema = z.object({
   caseKey: z.string().max(1_024).nullable().optional(),
+  originIssueId: z.string().guid().optional(),
   title: z.string().trim().min(1).max(500),
   summary: z.string().max(8_000).nullable().optional(),
   fields: jsonObjectSchema.optional(),

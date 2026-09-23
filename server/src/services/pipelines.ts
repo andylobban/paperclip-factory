@@ -2224,6 +2224,110 @@ async function descendantCaseIds(db: PipelineDb, companyId: string, rootCaseIds:
   return Array.from(result).map((row) => String((row as { id: string }).id));
 }
 
+async function ensureOriginIssueLink(
+  db: PipelineDb,
+  input: {
+    companyId: string;
+    caseId: string;
+    originIssueId: string | null;
+    actor: PipelineActor;
+  },
+) {
+  if (!input.originIssueId) return null;
+
+  const pipelineCase = await db
+    .select({ id: pipelineCases.id })
+    .from(pipelineCases)
+    .where(and(
+      eq(pipelineCases.id, input.caseId),
+      eq(pipelineCases.companyId, input.companyId),
+    ))
+    .for("update")
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!pipelineCase) throw notFound("Pipeline case not found");
+
+  const issue = await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      eq(issues.id, input.originIssueId),
+      eq(issues.companyId, input.companyId),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!issue) {
+    throw unprocessable("Origin issue must belong to the pipeline company", {
+      code: "origin_issue_not_found",
+      originIssueId: input.originIssueId,
+    });
+  }
+
+  const links = await db
+    .select()
+    .from(pipelineCaseIssueLinks)
+    .where(and(
+      eq(pipelineCaseIssueLinks.companyId, input.companyId),
+      eq(pipelineCaseIssueLinks.caseId, input.caseId),
+    ));
+  const sameIssueLink = links.find((link) => link.issueId === input.originIssueId);
+  if (sameIssueLink && sameIssueLink.role !== "origin") {
+    throw conflict("Issue is already linked to this pipeline case with another role", {
+      code: "issue_link_role_conflict",
+      issueId: input.originIssueId,
+      currentRole: sameIssueLink.role,
+      requestedRole: "origin",
+    });
+  }
+  const otherOriginLink = links.find((link) =>
+    link.role === "origin" &&
+    link.issueId !== input.originIssueId &&
+    link.retiredAt === null
+  );
+  if (otherOriginLink) {
+    throw conflict("Pipeline case already has another origin issue", {
+      code: "origin_issue_conflict",
+      issueId: otherOriginLink.issueId,
+      requestedIssueId: input.originIssueId,
+    });
+  }
+  if (sameIssueLink?.retiredAt === null) return sameIssueLink;
+
+  const now = nowDate();
+  const link = sameIssueLink
+    ? await db
+      .update(pipelineCaseIssueLinks)
+      .set({
+        retiredAt: null,
+        retiredByAttemptId: null,
+        retiredReason: null,
+        updatedAt: now,
+      })
+      .where(eq(pipelineCaseIssueLinks.id, sameIssueLink.id))
+      .returning()
+      .then((rows) => rows[0]!)
+    : await db
+      .insert(pipelineCaseIssueLinks)
+      .values({
+        companyId: input.companyId,
+        caseId: input.caseId,
+        issueId: input.originIssueId,
+        role: "origin",
+        createdByRunId: input.actor.type === "agent" ? input.actor.runId : null,
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+  await writeCaseEvent(db, {
+    companyId: input.companyId,
+    caseId: input.caseId,
+    type: "issue_linked",
+    actor: input.actor,
+    payload: { issueId: input.originIssueId, role: "origin" },
+  });
+  return link;
+}
+
 export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}) {
   const routinesSvc = routineService(db, { heartbeat: deps.heartbeat });
   const outputsSvc = pipelineCaseOutputsService(db);
@@ -3894,6 +3998,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       companyId: string;
       pipelineId: string;
       caseKey?: string | null;
+      originIssueId?: string | null;
       title: string;
       summary?: string | null;
       fields?: Record<string, unknown>;
@@ -3934,7 +4039,15 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             ))
             .limit(1)
             .then((rows) => rows[0] ?? null);
-          if (existingByRequestKey) return { case: existingByRequestKey, created: false };
+          if (existingByRequestKey) {
+            const originIssueLink = await ensureOriginIssueLink(tx, {
+              companyId: input.companyId,
+              caseId: existingByRequestKey.id,
+              originIssueId: input.originIssueId ?? null,
+              actor: input.actor,
+            });
+            return { case: existingByRequestKey, created: false, originIssueLink };
+          }
         }
         const automationAttempt = input.actor.type === "agent"
           ? await resolveAutomationAttemptForActorRun(tx, input.companyId, input.actor.runId)
@@ -4010,8 +4123,21 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             .limit(1)
             .then((rows) => rows[0] ?? null);
           if (!existing) throw conflict("Pipeline case ingest conflict", { code: "ingest_conflict" });
-          return { case: existing, created: false };
+          const originIssueLink = await ensureOriginIssueLink(tx, {
+            companyId: input.companyId,
+            caseId: existing.id,
+            originIssueId: input.originIssueId ?? null,
+            actor: input.actor,
+          });
+          return { case: existing, created: false, originIssueLink };
         }
+
+        const originIssueLink = await ensureOriginIssueLink(tx, {
+          companyId: input.companyId,
+          caseId: inserted.id,
+          originIssueId: input.originIssueId ?? null,
+          actor: input.actor,
+        });
 
         await ensurePipelineCaseBodyDocumentFromSummary(tx, {
           companyId: input.companyId,
@@ -4058,9 +4184,9 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             eventId: ingestEvent.id,
           });
           if (ledger) automationLedgers.push(ledger);
-          return { case: inserted, created: true, event: ingestEvent, automationLedger: ledger };
+          return { case: inserted, created: true, event: ingestEvent, automationLedger: ledger, originIssueLink };
         }
-        return { case: inserted, created: true, event: ingestEvent, automationLedger: null };
+        return { case: inserted, created: true, event: ingestEvent, automationLedger: null, originIssueLink };
       });
       const automationExecutions = await executeAutomationLedgers(automationLedgers, { type: "system" });
       if ("automationLedger" in result && result.automationLedger) {
@@ -4078,6 +4204,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       pipelineId: string;
       items: Array<{
         caseKey?: string | null;
+        originIssueId?: string | null;
         title: string;
         summary?: string | null;
         fields?: Record<string, unknown>;
