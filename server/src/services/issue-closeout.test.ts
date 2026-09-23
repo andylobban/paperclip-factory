@@ -82,7 +82,7 @@ describeEmbeddedPostgres("issue closeout scope governance", () => {
       .resolves.toMatchObject({ id: parentId, status: "done" });
   }, 30_000);
 
-  it("blocks the AND-517 failure mode until all nine items and independent review are current", async () => {
+  it("blocks the original false-completion failure until all nine items and independent review are current", async () => {
     tempDb ??= await startEmbeddedPostgresTestDatabase("paperclip-closeout-");
     const db = createDb(tempDb.connectionString);
     const companyId = randomUUID();
