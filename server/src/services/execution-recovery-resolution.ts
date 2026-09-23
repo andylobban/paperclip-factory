@@ -18,9 +18,88 @@ import { buildExecutionContinuation } from "./execution-continuation.js";
 import {
   EXECUTION_RECONCILIATION_CAUSES,
   type ExecutionReconciliation,
+  type ExecutionReconciliationContinuationDelivery,
+  type ExecutionReconciliationDisposition,
+  type ExecutionReconciliationResult,
+  type IssueRecoveryAction,
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+
+const EXECUTION_RECONCILIATION_ACTION_OUTCOMES = new Set([
+  "completed",
+  "not_performed",
+  "mixed",
+] as const);
+const EXECUTION_RECONCILIATION_CONTINUATION_DELIVERIES = new Set([
+  "pending",
+  "delegated",
+  "delivered",
+  "invalidated",
+] as const);
+
+export function persistedExecutionReconciliation(
+  action: Pick<IssueRecoveryAction, "evidence">,
+): ExecutionReconciliation | null {
+  const value = action.evidence.executionReconciliation;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.runId !== "string" ||
+    record.providerStopped !== true ||
+    typeof record.actionOutcome !== "string" ||
+    !EXECUTION_RECONCILIATION_ACTION_OUTCOMES.has(
+      record.actionOutcome as ExecutionReconciliation["actionOutcome"],
+    ) ||
+    typeof record.outcomeEvidence !== "string"
+  ) {
+    return null;
+  }
+  return {
+    runId: record.runId,
+    providerStopped: true,
+    actionOutcome:
+      record.actionOutcome as ExecutionReconciliation["actionOutcome"],
+    outcomeEvidence: record.outcomeEvidence,
+  };
+}
+
+export function executionReconciliationMatches(
+  persisted: ExecutionReconciliation,
+  submitted: ExecutionReconciliation,
+): boolean {
+  return (
+    persisted.runId === submitted.runId &&
+    persisted.providerStopped === submitted.providerStopped &&
+    persisted.actionOutcome === submitted.actionOutcome &&
+    persisted.outcomeEvidence === submitted.outcomeEvidence
+  );
+}
+
+export function executionReconciliationResult(
+  action: Pick<IssueRecoveryAction, "evidence">,
+  decision: ExecutionReconciliation,
+  disposition: ExecutionReconciliationDisposition,
+): ExecutionReconciliationResult {
+  const continuationDelivery = action.evidence.continuationDelivery;
+  if (
+    typeof continuationDelivery !== "string" ||
+    !EXECUTION_RECONCILIATION_CONTINUATION_DELIVERIES.has(
+      continuationDelivery as ExecutionReconciliationContinuationDelivery,
+    )
+  ) {
+    throw new Error(
+      "Persisted execution reconciliation is missing its continuation delivery state",
+    );
+  }
+  return {
+    disposition,
+    actionOutcome: decision.actionOutcome,
+    continuationDelivery:
+      continuationDelivery as ExecutionReconciliationContinuationDelivery,
+    replayStarted: false,
+  };
+}
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {

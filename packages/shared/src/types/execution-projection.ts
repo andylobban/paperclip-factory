@@ -65,3 +65,22 @@ export interface ExecutionReconciliation {
   actionOutcome: "completed" | "not_performed" | "mixed";
   outcomeEvidence: string;
 }
+
+export type ExecutionReconciliationDisposition =
+  | "accepted"
+  | "verified_no_op"
+  | "idempotent_repeat";
+
+export type ExecutionReconciliationContinuationDelivery =
+  | "pending"
+  | "delegated"
+  | "delivered"
+  | "invalidated";
+
+/** Typed receipt for a stopped-execution decision. The stopped run is never replayed. */
+export interface ExecutionReconciliationResult {
+  disposition: ExecutionReconciliationDisposition;
+  actionOutcome: ExecutionReconciliation["actionOutcome"];
+  continuationDelivery: ExecutionReconciliationContinuationDelivery;
+  replayStarted: false;
+}

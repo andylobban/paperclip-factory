@@ -3,8 +3,11 @@ import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions
 import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { extractIssueReferenceIdentifiers, requiresExecutionReconciliation } from "@paperclipai/shared";
 import {
+  executionReconciliationMatches,
+  executionReconciliationResult,
   validateExecutionReconciliation,
   markExecutionReconciliation,
+  persistedExecutionReconciliation,
 } from "../services/execution-recovery-resolution.js";
 import {
   storedSteeringAcknowledgement,
@@ -9213,12 +9216,43 @@ export function issueRoutes(
               ),
             );
           if (settled) {
+            const settledRecoveryAction =
+              issueRecoveryActionReadModel(settled);
             await requireRecoveryActionAuthority(
               req,
               lockedIssue,
-              issueRecoveryActionReadModel(settled),
+              settledRecoveryAction,
               { source: "recovery_action_resolution" },
             );
+            const persistedReconciliation =
+              persistedExecutionReconciliation(settledRecoveryAction);
+            if (executionReconciliation && persistedReconciliation) {
+              if (
+                outcome !== "restored" ||
+                sourceIssueStatus !== "todo" ||
+                !executionReconciliationMatches(
+                  persistedReconciliation,
+                  executionReconciliation,
+                )
+              ) {
+                throw conflict(
+                  "This stopped execution already has a different reconciliation decision.",
+                  { code: "execution_reconciliation_conflict" },
+                );
+              }
+              return {
+                issue: lockedIssue,
+                recoveryAction: settledRecoveryAction,
+                replayed: true,
+                chatRetry: null,
+                executionReconciliationResult:
+                  executionReconciliationResult(
+                    settledRecoveryAction,
+                    persistedReconciliation,
+                    "idempotent_repeat",
+                  ),
+              };
+            }
             const automatic = settled.evidence.automaticRecovery as
               { replay?: string } | undefined;
             if (automatic?.replay === "blocked" && executionReconciliation) {
@@ -9243,8 +9277,9 @@ export function issueRoutes(
             } else {
               return {
                 issue: lockedIssue,
-                recoveryAction: settled,
+                recoveryAction: settledRecoveryAction,
                 replayed: true,
+                chatRetry: null,
               };
             }
           }
@@ -9500,12 +9535,34 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
-        return { issue, recoveryAction, chatRetry };
+        return {
+          issue,
+          recoveryAction,
+          chatRetry,
+          ...(executionReconciliation
+            ? {
+                executionReconciliationResult:
+                  executionReconciliationResult(
+                    recoveryAction,
+                    executionReconciliation,
+                    executionReconciliation.actionOutcome === "not_performed"
+                      ? "verified_no_op"
+                      : "accepted",
+                  ),
+              }
+            : {}),
+        };
       });
       if (result.replayed) {
         res.json({
           issue: result.issue,
           recoveryAction: result.recoveryAction,
+          ...(result.executionReconciliationResult
+            ? {
+                executionReconciliationResult:
+                  result.executionReconciliationResult,
+              }
+            : {}),
         });
         return;
       }
@@ -9616,6 +9673,12 @@ export function issueRoutes(
           activeRecoveryAction: null,
         },
         recoveryAction: result.recoveryAction,
+        ...(result.executionReconciliationResult
+          ? {
+              executionReconciliationResult:
+                result.executionReconciliationResult,
+            }
+          : {}),
       });
     },
   );

@@ -1123,6 +1123,7 @@ export type {
   IssueBlockedInboxSeverity,
   IssueBlockedInboxState,
   IssueRecoveryAction,
+  ResolveIssueRecoveryActionResponse,
   IssueWatchdog,
   IssueWatchdogStatus,
   IssueWatchdogSummary,
@@ -1955,7 +1956,9 @@ export {
   stalledReviewDecisionSchema,
   issueExecutionPolicySchema,
   issueExecutionStateSchema,
+  issueRecoveryActionReadModelSchema,
   resolveIssueRecoveryActionSchema,
+  executionReconciliationResultSchema,
   issueReviewRequestSchema,
   issueExecutionWorkspaceSettingsSchema,
   checkoutIssueSchema,
@@ -2756,7 +2759,14 @@ export {
 } from "./runtime-exposure/loopback-bind.js";
 export { ACCOUNT_HANDLE_MAX_LENGTH, toAccountHandle } from "./account-handle.js";
 export type { ExecutionContinuationEnvelope } from "./types/execution-continuation.js";
-export type { ExecutionProjection, ExecutionReconciliation, ExecutionBlocker } from "./types/execution-projection.js";
+export type {
+  ExecutionProjection,
+  ExecutionReconciliation,
+  ExecutionReconciliationDisposition,
+  ExecutionReconciliationContinuationDelivery,
+  ExecutionReconciliationResult,
+  ExecutionBlocker,
+} from "./types/execution-projection.js";
 
 export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
 

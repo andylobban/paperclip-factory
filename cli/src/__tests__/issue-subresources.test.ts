@@ -131,6 +131,37 @@ describe("issue subresource commands", () => {
     ]);
   });
 
+  it("prints the typed stopped-execution reconciliation receipt", async () => {
+    const receipt = {
+      issue: { id: ISSUE_ID, status: "todo" },
+      recoveryAction: { id: APPROVAL_ID, status: "resolved" },
+      executionReconciliationResult: {
+        disposition: "verified_no_op",
+        actionOutcome: "not_performed",
+        continuationDelivery: "pending",
+        replayStarted: false,
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(receipt)),
+    );
+
+    await run([
+      "issue", "recovery:resolve", ISSUE_ID,
+      "--outcome", "restored",
+      "--source-issue-status", "todo",
+      "--action-id", APPROVAL_ID,
+      "--execution-run-id", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "--provider-stopped",
+      "--action-outcome", "not_performed",
+      "--outcome-evidence", "Provider log confirms no action was submitted before the stop.",
+      "--json",
+    ]);
+
+    expect(console.log).toHaveBeenCalledWith(JSON.stringify(receipt, null, 2));
+  });
+
   it("wraps document and work product endpoints", async () => {
     const fetchMock = vi
       .fn()

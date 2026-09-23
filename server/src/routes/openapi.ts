@@ -199,6 +199,8 @@ import {
   updateDocumentAnnotationThreadSchema,
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
+  executionReconciliationResultSchema,
+  issueRecoveryActionReadModelSchema,
   resolveIssueRecoveryActionSchema,
   cancelIssueThreadInteractionSchema,
   // Secret provider configs and remote import
@@ -9730,6 +9732,22 @@ registerCurrentRoute({
   tags: ["issues"],
   summary: "Resolve an issue recovery action",
   body: resolveIssueRecoveryActionSchema,
+  responses: {
+    200: r.ok(
+      z
+        .object({
+          issue: z.record(z.string(), z.unknown()),
+          recoveryAction: issueRecoveryActionReadModelSchema,
+          executionReconciliationResult:
+            executionReconciliationResultSchema.optional(),
+        })
+        .strict(),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registerCurrentRoute({
