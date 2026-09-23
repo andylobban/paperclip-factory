@@ -1,4 +1,7 @@
-import type { ExecutionReconciliation } from "@paperclipai/shared";
+import type {
+  ExecutionReconciliation,
+  ResolveIssueRecoveryActionResponse,
+} from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
   AskUserQuestionsAnswer,
@@ -73,10 +76,7 @@ export type IssueUpdateResponse = Issue & {
   blockedByIssueIds?: string[];
 };
 
-export type ResolveRecoveryActionResponse = {
-  issue: Issue;
-  recoveryAction: IssueRecoveryAction;
-};
+export type ResolveRecoveryActionResponse = ResolveIssueRecoveryActionResponse;
 
 export type RecoveryActionDiagnostic = {
   action: IssueRecoveryAction | null;
