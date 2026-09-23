@@ -9117,10 +9117,19 @@ export function issueRoutes(
     const issue = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
     if (!issue) return;
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const blocker = await getExecutionBlocker(db, issue.companyId, issue.id);
+    if (
+      !blocker?.recoveryActionId ||
+      !requiresExecutionReconciliation(blocker.cause)
+    ) {
+      res.json({ action: null, requiresExecutionReconciliation: false });
+      return;
+    }
     const [hold] = await db
       .select()
       .from(issueRecoveryActions)
       .where(and(
+        eq(issueRecoveryActions.id, blocker.recoveryActionId),
         eq(issueRecoveryActions.companyId, issue.companyId),
         eq(issueRecoveryActions.sourceIssueId, issue.id),
         eq(issueRecoveryActions.status, "resolved"),
