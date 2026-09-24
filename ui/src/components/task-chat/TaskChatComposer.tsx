@@ -25,6 +25,7 @@ import {
   type ComposerDraftSubmission,
 } from "@/lib/composer-draft";
 import { CommentSubmissionUnknownError } from "@/lib/comment-submit-result";
+import { createClientUuid } from "@/lib/client-uuid";
 import {
   ArrowUp,
   Square,
@@ -474,6 +475,9 @@ export function TaskChatComposer({
   const editorRef = useRef<MarkdownEditorRef>(null);
   const bodyRef = useRef(body);
   bodyRef.current = body;
+  function readComposerBody() {
+    return editorRef.current?.getMarkdown() ?? bodyRef.current;
+  }
   const pendingDraftRef = useRef<{
     draftKey: string;
     attemptId: string;
@@ -661,7 +665,7 @@ export function TaskChatComposer({
 
   /** Upload an image and return its URL for inline `![](src)` markdown. */
   async function uploadInlineImage(file: File): Promise<string> {
-    const id = crypto.randomUUID();
+    const id = createClientUuid();
     setAttachments((prev) => [
       ...prev,
       {
@@ -842,17 +846,36 @@ export function TaskChatComposer({
   const canResetPausedConversation = conversationMode && !queuedEdit && body.trim() === "/new" && attachments.length === 0;
 
   async function submit() {
-    if (disabled || (pause && !canResetPausedConversation)) return;
+    if (disabled) {
+      setActionError(disabledReason ?? "This message cannot be sent right now.");
+      return;
+    }
+    if (pause && !canResetPausedConversation) {
+      setActionError("Send /new to resume this paused conversation.");
+      return;
+    }
     const retained =
       draftKey && !queuedEdit ? loadDraftSubmission(draftKey) : null;
     if (retained && !submitting) {
       setUncertainSubmission(retained);
       return;
     }
-    const submittedBody = bodyRef.current;
+    const editorBody = readComposerBody();
+    const submittedBody =
+      editorBody.trim().length > 0 && editorBody !== bodyRef.current
+        ? editorBody
+        : bodyRef.current;
+    if (submittedBody !== bodyRef.current) {
+      bodyRef.current = submittedBody;
+      setBody(submittedBody);
+    }
     const submittedAttachments = attachmentsRef.current;
     const submittedAssignee = pendingAssigneeRef.current;
     const trimmed = submittedBody.trim();
+    if (!trimmed && attachedRefs.length === 0) {
+      setActionError("Type a message before sending.");
+      return;
+    }
     const goalCommand = queuedEdit
       ? ({ matched: false } as const)
       : parseRunnerGoalCommand(submittedBody);
@@ -916,7 +939,6 @@ export function TaskChatComposer({
       return;
     }
     if (
-      (!trimmed && attachedRefs.length === 0) ||
       uploadPending ||
       uploadFailed ||
       submitting ||
@@ -978,7 +1000,7 @@ export function TaskChatComposer({
         setBody(submittedBody);
         return;
       }
-      attemptId = crypto.randomUUID();
+      attemptId = createClientUuid();
       if (draftKey) {
         saveDraft(draftKey, submittedBody);
         saveDraftSubmission(draftKey, { attemptId, reviewed: false });
@@ -1017,6 +1039,9 @@ export function TaskChatComposer({
         updatePendingAssignee(null);
       }
     } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "The message could not be sent.",
+      );
       if (mountedTaskKey.current !== draftKey) return;
       const nextDraft = bodyRef.current;
       if (attemptId && error instanceof CommentSubmissionUnknownError) {
@@ -1046,6 +1071,20 @@ export function TaskChatComposer({
       if (pendingDraftRef.current?.attemptId === attemptId) pendingDraftRef.current = null;
       setSubmitting(false);
     }
+  }
+
+  async function handlePrimaryAction() {
+    if (showStop) {
+      const hasLiveDraft =
+        readComposerBody().trim().length > 0 ||
+        bodyRef.current.trim().length > 0 ||
+        attachmentsRef.current.length > 0;
+      if (!hasLiveDraft) {
+        await stopControl.stop();
+        return;
+      }
+    }
+    await submit();
   }
 
   useEffect(() => {
@@ -1564,7 +1603,7 @@ export function TaskChatComposer({
 
             <button
               type="button"
-              onClick={() => void (showStop ? stopControl.stop() : submit())}
+              onClick={() => void handlePrimaryAction()}
               disabled={
                 showStop
                   ? disabled || stopControl.stopping
@@ -1573,8 +1612,7 @@ export function TaskChatComposer({
                     submitting ||
                     !!uncertainSubmission ||
                     uploadPending ||
-                    uploadFailed ||
-                    (body.trim().length === 0 && attachedRefs.length === 0)
+                    uploadFailed
               }
               title={
                 showStop

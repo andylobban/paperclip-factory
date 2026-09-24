@@ -2,6 +2,7 @@
 
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { buildIssueReferenceHref, buildProjectMentionHref, buildRoutineMentionHref, buildSkillMentionHref } from "@paperclipai/shared";
 import {
@@ -346,6 +347,62 @@ describe("MarkdownEditor", () => {
 
     await flush();
     expect(container.textContent).toContain("Loaded plan body");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("supports native input, submit shortcuts, and imperative reads in plain-text mode", async () => {
+    const handleChange = vi.fn();
+    const handleSubmit = vi.fn();
+    const editorRef = { current: null as MarkdownEditorRef | null };
+    const root = createRoot(container);
+    function PlainTextHarness() {
+      const [value, setValue] = useState("");
+      return (
+        <MarkdownEditor
+          ref={editorRef}
+          forcePlainText
+          value={value}
+          onChange={(next) => {
+            handleChange(next);
+            setValue(next);
+          }}
+          onSubmit={handleSubmit}
+          placeholder="Reply"
+        />
+      );
+    }
+
+    await act(async () => {
+      root.render(<PlainTextHarness />);
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="markdown-editor-plain-textarea"]',
+    );
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(textarea, "Verify and close");
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(handleChange).toHaveBeenCalledWith("Verify and close");
+    expect(editorRef.current?.getMarkdown()).toBe("Verify and close");
+
+    await act(async () => {
+      textarea!.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Enter",
+        metaKey: true,
+      }));
+    });
+    expect(handleSubmit).toHaveBeenCalledOnce();
 
     await act(async () => {
       root.unmount();

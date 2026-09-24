@@ -6,6 +6,7 @@ import {
   forwardRef,
   StrictMode,
   useImperativeHandle,
+  useRef,
   useState,
 } from "react";
 import { flushSync } from "react-dom";
@@ -136,6 +137,7 @@ vi.mock("./MarkdownEditor", () => ({
         className,
         contentClassName,
         fileDropTarget,
+        onSubmit,
       }: {
         value?: string;
         onChange?: (value: string) => void;
@@ -143,15 +145,19 @@ vi.mock("./MarkdownEditor", () => ({
         className?: string;
         contentClassName?: string;
         fileDropTarget?: "editor" | "parent";
+        onSubmit?: () => void;
       },
       ref,
     ) => {
+      const textareaRef = useRef<HTMLTextAreaElement>(null);
       useImperativeHandle(ref, () => ({
         focus: markdownEditorFocusMock,
+        getMarkdown: () => textareaRef.current?.value ?? value,
       }));
 
       return (
         <textarea
+          ref={textareaRef}
           aria-label="Issue chat editor"
           data-class-name={className}
           data-content-class-name={contentClassName}
@@ -159,6 +165,15 @@ vi.mock("./MarkdownEditor", () => ({
           placeholder={placeholder}
           value={value}
           onChange={(event) => onChange?.(event.target.value)}
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              (event.metaKey || event.ctrlKey)
+            ) {
+              event.preventDefault();
+              onSubmit?.();
+            }
+          }}
         />
       );
     },
@@ -802,6 +817,64 @@ describe("IssueChatThread", () => {
       root.unmount();
     });
   });
+
+  it.each(["click", "keyboard"])(
+    "submits visible classic-composer text with stale controlled state by %s",
+    async (trigger) => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(
+          <MemoryRouter>
+            <IssueChatThread
+              comments={[]}
+              linkedRuns={[]}
+              timelineEvents={[]}
+              liveRuns={[]}
+              onAdd={onAdd}
+              enableLiveTranscriptPolling={false}
+            />
+          </MemoryRouter>,
+        );
+      });
+
+      const editor = container.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Issue chat editor"]',
+      )!;
+      Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!.call(editor, "Confirm this and move to done");
+
+      await act(async () => {
+        if (trigger === "keyboard") {
+          editor.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              bubbles: true,
+              cancelable: true,
+              key: "Enter",
+              metaKey: true,
+            }),
+          );
+        } else {
+          Array.from(container.querySelectorAll("button"))
+            .find((button) => button.textContent === "Send")!
+            .click();
+        }
+      });
+
+      expect(onAdd).toHaveBeenCalledWith(
+        "Confirm this and move to done",
+        undefined,
+        undefined,
+        undefined,
+        expect.any(String),
+      );
+
+      await act(async () => root.unmount());
+    },
+  );
 
   it("selects ask mode from the composer menu and cycles work modes with cmd-period", () => {
     const root = createRoot(container);

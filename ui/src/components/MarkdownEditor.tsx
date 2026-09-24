@@ -100,12 +100,15 @@ interface MarkdownEditorProps {
   onSubmit?: () => void;
   /** Render the rich editor without allowing edits. */
   readOnly?: boolean;
+  /** Use a native textarea while retaining the MarkdownEditor imperative API. */
+  forcePlainText?: boolean;
 }
 
 export interface MarkdownEditorRef {
   focus: () => void;
   insertMarkdown: (markdown: string) => void;
   clear: () => void;
+  getMarkdown: () => string;
 }
 
 class MarkdownEditorRichErrorBoundary extends Component<
@@ -717,6 +720,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
   actionCommands = [],
   onSubmit,
   readOnly = false,
+  forcePlainText = false,
 }: MarkdownEditorProps, forwardedRef) {
   const editorValue = useMemo(() => prepareMarkdownForEditor(value), [value]);
   const { slashCommands: sharedSlashCommands } = useEditorAutocomplete();
@@ -740,6 +744,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [richEditorError, setRichEditorError] = useState<RichEditorError | null>(null);
+  const usePlainText = forcePlainText || richEditorError !== null;
   const dragDepthRef = useRef(0);
 
   // Stable ref for imageUploadHandler so plugins don't recreate on every render
@@ -806,7 +811,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
 
   const insertMarkdown = useCallback((markdown: string) => {
     if (readOnly) return;
-    if (!richEditorError && ref.current) {
+    if (!usePlainText && ref.current) {
       // MDXEditor's insertMarkdown silently no-ops without a Lexical selection
       // (an editor that was never focused). Focus first — the callback runs
       // once focus (and a selection: caret kept, else rootEnd) is in place.
@@ -831,11 +836,43 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
       const cursor = start + markdown.length;
       textarea.setSelectionRange(cursor, cursor);
     });
-  }, [onChange, readOnly, richEditorError, value]);
+  }, [onChange, readOnly, usePlainText, value]);
+
+  const readCurrentMarkdown = useCallback(() => {
+    if (usePlainText) {
+      return fallbackTextareaRef.current?.value ?? value;
+    }
+
+    let exported = "";
+    try {
+      exported = toStoredMarkdown(
+        ref.current?.getMarkdown() ?? latestValueRef.current,
+      );
+    } catch {
+      exported = value;
+    }
+    if (exported.trim().length > 0) return exported;
+
+    const editable = containerRef.current?.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    );
+    const visible = (editable?.innerText || editable?.textContent || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\r\n?/g, "\n");
+    const visibleTrimmed = visible.trim();
+    const placeholderTrimmed = placeholder?.trim() ?? "";
+    if (
+      visibleTrimmed.length === 0 ||
+      (value.trim().length === 0 && visibleTrimmed === placeholderTrimmed)
+    ) {
+      return exported;
+    }
+    return visible;
+  }, [placeholder, usePlainText, value]);
 
   useImperativeHandle(forwardedRef, () => ({
     focus: () => {
-      if (richEditorError) {
+      if (usePlainText) {
         fallbackTextareaRef.current?.focus();
         return;
       }
@@ -848,7 +885,8 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
       ref.current?.setMarkdown("");
       if (fallbackTextareaRef.current) fallbackTextareaRef.current.value = "";
     },
-  }), [insertMarkdown, richEditorError]);
+    getMarkdown: readCurrentMarkdown,
+  }), [insertMarkdown, readCurrentMarkdown, usePlainText]);
 
   const autoSizeFallbackTextarea = useCallback((element: HTMLTextAreaElement | null) => {
     if (!element) return;
@@ -857,9 +895,9 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
   }, []);
 
   useEffect(() => {
-    if (!richEditorError) return;
+    if (!usePlainText) return;
     autoSizeFallbackTextarea(fallbackTextareaRef.current);
-  }, [autoSizeFallbackTextarea, richEditorError, value]);
+  }, [autoSizeFallbackTextarea, usePlainText, value]);
 
   useEffect(() => {
     if (richEditorError || editorValue.trim().length === 0) return;
@@ -1300,7 +1338,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
       )
     : null;
 
-  if (richEditorError) {
+  if (usePlainText) {
     return (
       <div
         ref={containerRef}
@@ -1310,29 +1348,29 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
           className,
         )}
       >
-        <div className="flex items-start justify-between gap-3 px-3 pt-2 text-xs text-muted-foreground">
-          <p>
-            Rich editor unavailable for this markdown. Showing raw source instead.{" "}
-            <span data-testid="markdown-editor-fallback-code" className="font-mono">
-              {richEditorError.code}
-            </span>
-          </p>
-          <button
-            type="button"
-            className="shrink-0 underline underline-offset-2 hover:text-foreground"
-            onClick={() => {
-              // The retry remounts MDXEditor, so re-arm the mount-time guard:
-              // a fresh mount can emit an empty onChange that would otherwise
-              // wipe the parent's value.
-              initialChildOnChangeRef.current = true;
-              setRichEditorError(null);
-            }}
-          >
-            Retry rich editor
-          </button>
-        </div>
+        {richEditorError ? (
+          <div className="flex items-start justify-between gap-3 px-3 pt-2 text-xs text-muted-foreground">
+            <p>
+              Rich editor unavailable for this markdown. Showing raw source instead.{" "}
+              <span data-testid="markdown-editor-fallback-code" className="font-mono">
+                {richEditorError.code}
+              </span>
+            </p>
+            <button
+              type="button"
+              className="shrink-0 underline underline-offset-2 hover:text-foreground"
+              onClick={() => {
+                initialChildOnChangeRef.current = true;
+                setRichEditorError(null);
+              }}
+            >
+              Retry rich editor
+            </button>
+          </div>
+        ) : null}
         <textarea
           ref={fallbackTextareaRef}
+          data-testid="markdown-editor-plain-textarea"
           value={value}
           placeholder={placeholder}
           readOnly={readOnly}

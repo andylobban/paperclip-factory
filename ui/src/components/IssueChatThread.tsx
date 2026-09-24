@@ -69,6 +69,7 @@ import {
   type ComposerDraftSubmission,
 } from "../lib/composer-draft";
 import { CommentSubmissionUnknownError } from "../lib/comment-submit-result";
+import { createClientUuid } from "../lib/client-uuid";
 import {
   buildIssueChatMessages,
   formatDurationWords,
@@ -4900,9 +4901,19 @@ const IssueChatComposer = forwardRef<
     composerAttachments.length === 0 &&
     Boolean(onStop || stopControl.stopping);
 
+  function readComposerBody() {
+    const editorBody = editorRef.current?.getMarkdown() ?? "";
+    return editorBody.trim().length > 0 ? editorBody : bodyRef.current;
+  }
+
   async function handleSubmit() {
     if (composerPause) return;
-    const trimmed = body.trim();
+    const submittedDraft = readComposerBody();
+    if (submittedDraft !== bodyRef.current) {
+      bodyRef.current = submittedDraft;
+      setBody(submittedDraft);
+    }
+    const trimmed = submittedDraft.trim();
     if (
       (!trimmed && attachedFiles.length === 0) ||
       submitting ||
@@ -4921,12 +4932,24 @@ const IssueChatComposer = forwardRef<
       return;
     }
 
-    await submitComment();
+    await submitComment(submittedDraft);
   }
 
-  async function submitComment() {
+  async function handlePrimaryAction() {
+    if (
+      showStop &&
+      readComposerBody().trim().length === 0 &&
+      composerAttachmentsRef.current.length === 0
+    ) {
+      await stopControl.stop();
+      return;
+    }
+    await handleSubmit();
+  }
+
+  async function submitComment(submittedDraft = readComposerBody()) {
     if (composerPause) return;
-    const trimmed = body.trim();
+    const trimmed = submittedDraft.trim();
     if (
       (!trimmed && attachedFiles.length === 0) ||
       submitting ||
@@ -4991,7 +5014,7 @@ const IssueChatComposer = forwardRef<
         setBody(trimmed);
         return;
       }
-      attemptId = crypto.randomUUID();
+      attemptId = createClientUuid();
       if (draftKey) {
         saveDraft(draftKey, trimmed);
         saveDraftSubmission(draftKey, { attemptId, reviewed: false });
@@ -5196,8 +5219,7 @@ const IssueChatComposer = forwardRef<
   const canSubmit =
     !submitting &&
     !uploadUnsettled &&
-    !uncertainSubmission &&
-    (!!body.trim() || attachedFiles.length > 0);
+    !uncertainSubmission;
 
   // Interrupt-handoff clarity (PAP-10669): preview what this comment will durably
   // do, and coach plain agent names toward real mentions.
@@ -5410,6 +5432,7 @@ const IssueChatComposer = forwardRef<
       ) : null}
       <MarkdownEditor
         ref={editorRef}
+        forcePlainText
         readOnly={!!uncertainSubmission}
         value={body}
         onChange={changeBody}
@@ -5660,7 +5683,7 @@ const IssueChatComposer = forwardRef<
           <Button
             size="icon-sm"
             disabled={stopControl.stopping}
-            onClick={() => void stopControl.stop()}
+            onClick={() => void handlePrimaryAction()}
             aria-label={stopControl.stopping ? "Stopping…" : "Stop"}
             title="Stop response"
           >
@@ -5674,7 +5697,7 @@ const IssueChatComposer = forwardRef<
           <Button
             size="sm"
             disabled={!canSubmit}
-            onClick={() => void handleSubmit()}
+            onClick={() => void handlePrimaryAction()}
           >
             {submitting ? "Posting..." : "Send"}
           </Button>

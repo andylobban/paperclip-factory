@@ -49,6 +49,7 @@ vi.mock("@mdxeditor/editor", async () => {
 
   interface MockHandle {
     setMarkdown: (value: string) => void;
+    getMarkdown: () => string;
     insertMarkdown: (value: string) => void;
     focus: (callback?: () => void) => void;
   }
@@ -78,6 +79,10 @@ vi.mock("@mdxeditor/editor", async () => {
           contentRef.current = value;
           if (editableRef.current) editableRef.current.textContent = value;
         },
+        getMarkdown: () =>
+          editableRef.current?.dataset.mockEmptyExport === "true"
+            ? ""
+            : (editableRef.current?.textContent ?? contentRef.current),
         insertMarkdown: (value: string) => {
           const next = contentRef.current
             ? `${contentRef.current}${value}`
@@ -290,6 +295,39 @@ function autocompleteOption(matchText: string) {
 }
 
 describe("TaskChatComposer", () => {
+  it("submits visible editor text when the controlled draft and editor export are stale", async () => {
+    const onAdd = vi.fn();
+    const onStop = vi.fn();
+    render(
+      <TaskChatComposer
+        onAdd={onAdd}
+        onStop={onStop}
+        workMode="standard"
+      />,
+    );
+    await flushAsync();
+
+    editable().dataset.mockEmptyExport = "true";
+    editable().textContent = "Confirm this and move to done";
+    const stalePrimaryAction = container.querySelector<HTMLButtonElement>(
+      '[data-testid="task-chat-composer-stop"]',
+    );
+    expect(stalePrimaryAction).not.toBeNull();
+    flushSync(() => {
+      stalePrimaryAction!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushAsync();
+
+    expect(onStop).not.toHaveBeenCalled();
+    expect(onAdd).toHaveBeenCalledWith(
+      "Confirm this and move to done",
+      undefined,
+      undefined,
+      undefined,
+      expect.any(String),
+    );
+  });
+
   it("settles an acknowledged submission after navigating away", async () => {
     const key = "navigate-before-save";
     let resolveSend!: () => void;
@@ -818,7 +856,7 @@ describe("TaskChatComposer", () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
     render(<TaskChatComposer onAdd={onAdd} workMode="standard" />);
 
-    expect(sendButton().disabled).toBe(true);
+    expect(sendButton().disabled).toBe(false);
     typeText("  hello there  ");
     expect(sendButton().disabled).toBe(false);
 
@@ -2808,10 +2846,10 @@ describe("composer Stop", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it("retains disabled Send when idle or when stop permission is absent", () => {
+  it("keeps idle Send actionable for live-editor recovery and disables explicit stop denial", () => {
     render(<TaskChatComposer workMode="standard" onAdd={vi.fn()} />);
     expect(stopButton()).toBeNull();
-    expect(sendButton().disabled).toBe(true);
+    expect(sendButton().disabled).toBe(false);
     render(<TaskChatComposer workMode="standard" onAdd={vi.fn()} onStop={vi.fn()} disabled />);
     expect(stopButton()?.disabled).toBe(true);
   });
