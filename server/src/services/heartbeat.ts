@@ -9373,6 +9373,94 @@ export function resolveHeartbeatSchedulingSuppression(
   return { suppressed: false, reason: null };
 }
 
+export async function loadRoutineEnvForExecutionIssue(
+  db: Db,
+  companyId: string,
+  issueContext: { originKind: string | null; originId: string | null; originRunId: string | null } | null,
+) {
+  if (
+    !issueContext ||
+    issueContext.originKind !== "routine_execution"
+  ) {
+    return { routineId: null, env: null, responsibleUserId: null };
+  }
+
+  const routineRun = issueContext.originRunId
+    ? await db
+        .select({
+          routineId: routineRuns.routineId,
+          routineRevisionId: routineRuns.routineRevisionId,
+          responsibleUserId: routineRuns.responsibleUserId,
+        })
+        .from(routineRuns)
+        .where(
+          and(
+            eq(routineRuns.id, issueContext.originRunId),
+            eq(routineRuns.companyId, companyId),
+          ),
+        )
+        .then((rows) => rows[0] ?? null)
+    : null;
+  const routineId = routineRun?.routineId ?? (
+    issueContext.originId && isUuidLike(issueContext.originId)
+      ? issueContext.originId
+      : null
+  );
+  if (!routineId) {
+    return { routineId: null, env: null, responsibleUserId: null };
+  }
+
+  if (routineRun?.routineRevisionId) {
+    const revision = await db
+      .select({
+        snapshot: routineRevisions.snapshot,
+        responsibleUserId: routineRevisions.responsibleUserId,
+      })
+      .from(routineRevisions)
+      .where(
+        and(
+          eq(routineRevisions.id, routineRun.routineRevisionId),
+          eq(routineRevisions.companyId, companyId),
+          eq(routineRevisions.routineId, routineId),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    const snapshot = revision?.snapshot as
+      RoutineRevisionSnapshotV1 | undefined;
+    if (snapshot?.version === 1) {
+      return {
+        routineId,
+        env: snapshot.routine.env ?? null,
+        responsibleUserId:
+          routineRun.responsibleUserId ??
+          revision?.responsibleUserId ??
+          snapshot.routine.responsibleUserId ??
+          null,
+      };
+    }
+  }
+
+  const routine = await db
+    .select({
+      env: routines.env,
+      responsibleUserId: routines.responsibleUserId,
+    })
+    .from(routines)
+    .where(
+      and(
+        eq(routines.id, routineId),
+        eq(routines.companyId, companyId),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+  return {
+    routineId,
+    env: routine?.env ?? null,
+    responsibleUserId:
+      routineRun?.responsibleUserId ?? routine?.responsibleUserId ?? null,
+  };
+}
+
 export function heartbeatService(
   db: Db,
   options: HeartbeatServiceOptions = {},
@@ -10707,80 +10795,7 @@ export function heartbeatService(
     companyId: string,
     issueContext: { originKind: string | null; originId: string | null; originRunId: string | null } | null,
   ) {
-    if (
-      !issueContext ||
-      issueContext.originKind !== "routine_execution" ||
-      !issueContext.originId
-    ) {
-      return { routineId: null, env: null, responsibleUserId: null };
-    }
-
-    const routineRun = issueContext.originRunId
-      ? await db
-          .select({
-            routineRevisionId: routineRuns.routineRevisionId,
-            responsibleUserId: routineRuns.responsibleUserId,
-          })
-          .from(routineRuns)
-          .where(
-            and(
-              eq(routineRuns.id, issueContext.originRunId),
-              eq(routineRuns.companyId, companyId),
-              eq(routineRuns.routineId, issueContext.originId),
-            ),
-          )
-          .then((rows) => rows[0] ?? null)
-      : null;
-
-    if (routineRun?.routineRevisionId) {
-      const revision = await db
-        .select({
-          snapshot: routineRevisions.snapshot,
-          responsibleUserId: routineRevisions.responsibleUserId,
-        })
-        .from(routineRevisions)
-        .where(
-          and(
-            eq(routineRevisions.id, routineRun.routineRevisionId),
-            eq(routineRevisions.companyId, companyId),
-            eq(routineRevisions.routineId, issueContext.originId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null);
-      const snapshot = revision?.snapshot as
-        RoutineRevisionSnapshotV1 | undefined;
-      if (snapshot?.version === 1) {
-        return {
-          routineId: issueContext.originId,
-          env: snapshot.routine.env ?? null,
-          responsibleUserId:
-            routineRun?.responsibleUserId ??
-            revision?.responsibleUserId ??
-            snapshot.routine.responsibleUserId ??
-            null,
-        };
-      }
-    }
-
-    const routine = await db
-      .select({
-        env: routines.env,
-        responsibleUserId: routines.responsibleUserId,
-      })
-      .from(routines)
-      .where(
-        and(
-          eq(routines.id, issueContext.originId),
-          eq(routines.companyId, companyId),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
-    return {
-      routineId: issueContext.originId,
-      env: routine?.env ?? null,
-      responsibleUserId:
-        routineRun?.responsibleUserId ?? routine?.responsibleUserId ?? null,
-    };
+    return loadRoutineEnvForExecutionIssue(db, companyId, issueContext);
   }
 
   async function resolveCompanyDefaultResponsibleUserId(companyId: string) {

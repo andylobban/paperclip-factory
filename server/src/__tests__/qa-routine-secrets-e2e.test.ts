@@ -39,7 +39,10 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
-import { resolveExecutionRunAdapterConfig } from "../services/heartbeat.ts";
+import {
+  loadRoutineEnvForExecutionIssue,
+  resolveExecutionRunAdapterConfig,
+} from "../services/heartbeat.ts";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEmbedded = support.supported ? describe : describe.skip;
@@ -197,6 +200,62 @@ describeEmbedded("PAP-9522 QA: routine secrets end-to-end", () => {
     });
     // No serialized field of the access event row can contain the secret value.
     expect(JSON.stringify(events[0])).not.toContain(ROUTINE_VALUE);
+  });
+
+  it("resolves a pipeline-stage issue's routine from its run instead of treating the semantic origin as a routine UUID", async () => {
+    const { companyId, executorAgentId } = await seed();
+    const routinesService = routineService(db, { heartbeat: { wakeup: async () => null } });
+    const routine = await routinesService.create(
+      companyId,
+      {
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "pipeline stage routine",
+        description: null,
+        assigneeAgentId: executorAgentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        env: { PIPELINE_STAGE_VALUE: { type: "plain", value: "resolved" } },
+      },
+      {},
+    );
+    const runId = randomUUID();
+    await db.insert(routineRuns).values({
+      id: runId,
+      companyId,
+      routineId: routine.id,
+      triggerId: null,
+      source: "api",
+      status: "issue_created",
+      triggeredAt: new Date(),
+      routineRevisionId: routine.latestRevisionId,
+      responsibleUserId: "responsible-user",
+    });
+
+    const result = await loadRoutineEnvForExecutionIssue(db, companyId, {
+      originKind: "routine_execution",
+      originId: `pipeline-stage:${randomUUID()}:observed:on_enter`,
+      originRunId: runId,
+    });
+
+    expect(result).toMatchObject({
+      routineId: routine.id,
+      env: { PIPELINE_STAGE_VALUE: { type: "plain", value: "resolved" } },
+      responsibleUserId: "responsible-user",
+    });
+
+    const legacyResult = await loadRoutineEnvForExecutionIssue(db, companyId, {
+      originKind: "routine_execution",
+      originId: routine.id,
+      originRunId: null,
+    });
+    expect(legacyResult).toMatchObject({
+      routineId: routine.id,
+      env: { PIPELINE_STAGE_VALUE: { type: "plain", value: "resolved" } },
+    });
   });
 
   it("rejects routine env that references a secret from a different company", async () => {
