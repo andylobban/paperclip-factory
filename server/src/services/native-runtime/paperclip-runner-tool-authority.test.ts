@@ -1105,6 +1105,116 @@ describe("PaperclipRunnerToolAuthority", () => {
     ).toHaveLength(3);
   });
 
+  it("reuses a semantic pipeline-stage child task after the stage is re-entered", async () => {
+    const pipelineScope = "pipeline-stage:case-design:automation-design";
+    const firstExecutionIssueId = "00000000-0000-4000-8000-000000000301";
+    const secondExecutionIssueId = "00000000-0000-4000-8000-000000000302";
+    const firstRunId = "00000000-0000-4000-8000-000000000303";
+    const secondRunId = "00000000-0000-4000-8000-000000000304";
+
+    await db.insert(issues).values([
+      {
+        id: firstExecutionIssueId,
+        companyId,
+        issueNumber: 4301,
+        identifier: "RNT-4301",
+        title: "First design-stage automation",
+        status: "in_progress",
+        workMode: "standard",
+        assigneeAgentId: agentId,
+        originKind: "routine_execution",
+        originId: pipelineScope,
+      },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      {
+        id: firstRunId,
+        companyId,
+        agentId,
+        status: "running",
+        runtimeMode: "native",
+        nativeIssueId: firstExecutionIssueId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        contextSnapshot: { issueId: firstExecutionIssueId },
+      },
+    ]);
+    await db.update(issues).set({ executionRunId: firstRunId }).where(eq(issues.id, firstExecutionIssueId));
+
+    const task = {
+      idempotencyKey: "design-contract:v1",
+      title: "Create DESIGN_CONTRACT v1",
+      description: "Produce the case design contract.",
+    };
+    const firstAuthority = new PaperclipRunnerToolAuthority(db, {
+      companyId,
+      agentId,
+      issueId: firstExecutionIssueId,
+      runId: firstRunId,
+      workMode: "standard",
+    });
+    const first = await firstAuthority.execute({ tool: "create_task", callId: "first-stage", arguments: task });
+    const firstTaskId = (first as { task: { id: string } }).task.id;
+    await issueService(db).update(firstTaskId, { status: "done", actorAgentId: agentId });
+    await issueService(db).update(firstExecutionIssueId, { status: "done", actorAgentId: agentId });
+    await db.insert(issues).values({
+      id: secondExecutionIssueId,
+      companyId,
+      issueNumber: 9902,
+      identifier: "RNT-9902",
+      title: "Repeated design-stage automation",
+      status: "in_progress",
+      workMode: "standard",
+      assigneeAgentId: agentId,
+      originKind: "routine_execution",
+      originId: pipelineScope,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: secondRunId,
+      companyId,
+      agentId,
+      status: "running",
+      runtimeMode: "native",
+      nativeIssueId: secondExecutionIssueId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      contextSnapshot: { issueId: secondExecutionIssueId },
+    });
+    await db.update(issues).set({ executionRunId: secondRunId }).where(eq(issues.id, secondExecutionIssueId));
+
+    const secondAuthority = new PaperclipRunnerToolAuthority(db, {
+      companyId,
+      agentId,
+      issueId: secondExecutionIssueId,
+      runId: secondRunId,
+      workMode: "standard",
+    });
+    const concurrentReentry = await Promise.all([
+      secondAuthority.execute({ tool: "create_task", callId: "reentered-stage-a", arguments: task }),
+      secondAuthority.execute({ tool: "create_task", callId: "reentered-stage-b", arguments: task }),
+    ]);
+    expect(concurrentReentry).toEqual(expect.arrayContaining([
+      expect.objectContaining({ disposition: "duplicate", task: expect.objectContaining({ id: firstTaskId }) }),
+    ]));
+    const semanticChildren = await db.select().from(issues).where(eq(
+      issues.originId,
+      `paperclip-runner:create-task:${pipelineScope}:${task.idempotencyKey}`,
+    ));
+    expect(semanticChildren).toHaveLength(1);
+
+    await expect(
+      secondAuthority.execute({
+        tool: "create_task",
+        callId: "revised-design-contract",
+        arguments: {
+          ...task,
+          idempotencyKey: "design-contract:v2",
+          description: "Supersedes design-contract:v1 after an explicit design revision.",
+        },
+      }),
+    ).resolves.toMatchObject({ disposition: "applied" });
+  });
+
   it("rejects mutations after reassignment, run replacement, or terminalization", async () => {
     const guardedIssueId = "00000000-0000-4000-8000-000000000107";
     const guardedRunId = "00000000-0000-4000-8000-000000000108";

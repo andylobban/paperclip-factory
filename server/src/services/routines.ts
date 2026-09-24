@@ -1724,6 +1724,7 @@ export function routineService(
     executionWorkspacePreference?: string | null;
     executionWorkspaceSettings?: Record<string, unknown> | null;
     descriptionAppendix?: string | null;
+    issueOriginId?: string | null;
     nextRunAtOverride?: Date | null;
     actor?: Actor;
   }) {
@@ -1770,7 +1771,7 @@ export function routineService(
     const issueOriginKind = managedIssueTemplate?.surfaceVisibility === "plugin_operation" && managedRoutineBinding
       ? pluginOperationIssueOriginKind(managedRoutineBinding.pluginKey)
       : "routine_execution";
-    const issueOriginId = managedIssueTemplate?.originId ?? input.routine.id;
+    const issueOriginId = input.issueOriginId ?? managedIssueTemplate?.originId ?? input.routine.id;
     const issueBillingCode = managedIssueTemplate?.billingCode ?? null;
     const dispatchFingerprint = createRoutineDispatchFingerprint({
       payload: triggerPayload,
@@ -2878,7 +2879,7 @@ export function routineService(
       });
     },
 
-    runPipelineStageEntryRoutine: async (id: string, input: RunRoutine & { descriptionAppendix?: string | null }, actor?: Actor) => {
+    runPipelineStageEntryRoutine: async (id: string, input: RunRoutine & { descriptionAppendix?: string | null; issueOriginId?: string | null }, actor?: Actor) => {
       const routine = await getRoutineById(id);
       if (!routine) throw notFound("Routine not found");
       if (routine.status === "archived") throw conflict("Routine is archived");
@@ -2900,6 +2901,7 @@ export function routineService(
         executionWorkspaceSettings:
           (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
         descriptionAppendix: input.descriptionAppendix ?? null,
+        issueOriginId: input.issueOriginId ?? null,
         actor,
       });
     },

@@ -149,6 +149,19 @@ function canonicalJson(value: unknown): string {
 export class PaperclipRunnerToolAuthority {
   constructor(readonly db: Db, readonly binding: Binding) {}
 
+  async #taskCreationScope() {
+    const source = await this.db
+      .select({ originKind: issues.originKind, originId: issues.originId })
+      .from(issues)
+      .where(and(eq(issues.id, this.binding.issueId), eq(issues.companyId, this.binding.companyId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (source?.originKind === "routine_execution" && source.originId?.startsWith("pipeline-stage:")) {
+      return source.originId;
+    }
+    return this.binding.issueId;
+  }
+
   definitions(): Array<Record<string, unknown>> {
     if (this.binding.nativeReview) {
       // Scope Paperclip control-plane actions. Provider file and shell access
@@ -805,7 +818,7 @@ export class PaperclipRunnerToolAuthority {
       ? input.blockedByTaskIds.map(requiredString)
       : [];
     const durableIdempotencyKey =
-      `paperclip-runner:create-task:${this.binding.issueId}:${idempotencyKey}`;
+      `paperclip-runner:create-task:${await this.#taskCreationScope()}:${idempotencyKey}`;
     const inputFingerprint = createHash("sha256")
       .update(canonicalJson(input))
       .digest("hex");
@@ -862,9 +875,30 @@ export class PaperclipRunnerToolAuthority {
         idempotencyKey: durableIdempotencyKey,
         onDeduplicated: () => { deduplicated = true; },
       };
-      const child = conversation
-        ? await issueService(tx).create(this.binding.companyId, createInput)
-        : (await issueService(tx).createChild(this.binding.issueId, createInput)).issue;
+      let child;
+      try {
+        child = conversation
+          ? await issueService(tx).create(this.binding.companyId, createInput)
+          : (await issueService(tx).createChild(this.binding.issueId, createInput)).issue;
+      } catch (error) {
+        // Pipeline stages can execute concurrently under different execution
+        // parents. A sibling may win the global idempotency key after the
+        // lookup above but before createChild validates its parent.
+        if (!(error instanceof Error)
+          || error.message !== "Child creation idempotency key belongs to another parent issue") {
+          throw error;
+        }
+        const semanticChild = await tx.select().from(issues).where(and(
+          eq(issues.companyId, this.binding.companyId),
+          eq(issues.originId, durableIdempotencyKey),
+        )).limit(1).then((rows) => rows[0] ?? null);
+        if (!semanticChild) throw error;
+        if (semanticChild.originFingerprint !== inputFingerprint) {
+          throw new Error("paperclip_runner_tool_idempotency_conflict");
+        }
+        deduplicated = true;
+        child = semanticChild;
+      }
       if (deduplicated && child.originFingerprint !== inputFingerprint) {
         throw new Error("paperclip_runner_tool_idempotency_conflict");
       }
