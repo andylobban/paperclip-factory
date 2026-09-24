@@ -63,13 +63,13 @@ test("canary reuses exact-source proof while stable keeps full verification", ()
 
 test("source proof requires every source check and does not wait on image publication", () => {
   const readiness = readWorkflow("cloud-readiness.yml");
-  const proof = readiness.split("  source_verified:\n")[1].split("\n  ready:")[0];
+  const proof = readiness.split("  source_verified:\n")[1];
   assert.match(proof, /name: Cloud source verified v1/);
   assert.match(proof, /needs: \[verify\]/);
   assert.match(proof, /node --test scripts\/cloud-source-verification.test.mjs/);
   assert.match(proof, /SOURCE_SHA: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(proof, /always\(\)|continue-on-error|needs:.*(?:image|artifacts)/);
-  assert.match(readiness.split("  ready:\n")[1], /needs: \[verify, image, artifacts\]/);
+  assert.doesNotMatch(readiness, /^  (?:image|artifacts|ready):/m);
 });
 
 test("onboard smoke container binds beyond loopback so the mapped port is reachable", () => {

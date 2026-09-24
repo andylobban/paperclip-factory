@@ -2694,6 +2694,7 @@ export {
   HIDEABLE_GENERAL_SECTIONS,
   HIDEABLE_INSTANCE_PAGES,
   HIDEABLE_SETTING_KEYS,
+  HIDEABLE_WORKSPACE_SECTIONS,
   SETTINGS_OPERATOR_MANAGED_ERROR_CODE,
   UI_ONLY_GENERAL_SECTIONS,
   experimentalSettingKey,
@@ -2709,6 +2710,7 @@ export {
   type HideableGeneralSection,
   type HideableInstancePage,
   type HideableSettingKey,
+  type HideableWorkspaceSection,
   type ParsedHiddenSettings,
 } from "./settings-visibility.js";
 export {
