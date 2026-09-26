@@ -70,6 +70,13 @@ export const agentWakeupRequests = pgTable(
       .where(
         sql`${table.idempotencyKey} LIKE 'issue_disposition_repair:%' AND ${table.status} <> 'skipped'`,
       ),
+    executionReconciliationIdempotencyUq: uniqueIndex(
+      "agent_wakeup_requests_execution_reconciliation_idempotency_uq",
+    )
+      .on(table.companyId, table.idempotencyKey)
+      .where(
+        sql`${table.idempotencyKey} LIKE 'execution-reconciliation:v2:%' AND ${table.status} <> 'skipped'`,
+      ),
     questionResponseDeliveryIdempotencyUq: uniqueIndex(
       "agent_wakeup_requests_question_response_delivery_idempotency_uq",
     )

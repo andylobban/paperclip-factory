@@ -3,8 +3,9 @@ import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } 
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
-import { and, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
 import {
+  agentWakeupRequests,
   chatActions,
   environmentLeases,
   heartbeatRuns,
@@ -25,6 +26,10 @@ import {
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import {
+  executionReconciliationIdempotencyKey,
+  legacyExecutionReconciliationIdempotencyKey,
+} from "./execution-reconciliation-identity.js";
 
 const EXECUTION_RECONCILIATION_ACTION_OUTCOMES = new Set([
   "completed",
@@ -239,6 +244,66 @@ export async function markExecutionReconciliation(
       throw conflict("The authorized chat retry owner is no longer valid.");
     }
   }
+  const recordedAt = new Date().toISOString();
+  const recordedDecision = {
+    ...decision,
+    actorId,
+    recordedAt,
+  };
+  const siblings = await db
+    .select()
+    .from(issueRecoveryActions)
+    .where(
+      and(
+        eq(issueRecoveryActions.companyId, action.companyId),
+        eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+        ne(issueRecoveryActions.id, action.id),
+        sql`${issueRecoveryActions.evidence}->>'runId' = ${decision.runId}`,
+        or(
+          sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+          sql`${issueRecoveryActions.evidence}->>'continuationDelivery' in ('pending', 'delivered')`,
+        ),
+      ),
+    )
+    .for("update");
+  for (const sibling of siblings) {
+    const siblingDecision = persistedExecutionReconciliation(sibling);
+    if (
+      siblingDecision &&
+      !executionReconciliationMatches(siblingDecision, decision)
+    ) {
+      throw conflict(
+        "This execution already has a different reconciliation decision.",
+        { code: "execution_reconciliation_conflict" },
+      );
+    }
+    if (sibling.evidence.continuationDelivery === "delivered") {
+      throw conflict(
+        "This execution already has a linked continuation. Inspect that run first.",
+        { code: "execution_reconciliation_already_delivered" },
+      );
+    }
+    if (sibling.evidence.continuationDelivery === "pending") {
+      const [existingDelivery] = await db
+        .select({ runId: agentWakeupRequests.runId })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, action.companyId),
+            ne(agentWakeupRequests.status, "skipped"),
+            sql`${agentWakeupRequests.payload}->>'recoveryActionId' = ${sibling.id}`,
+          ),
+        )
+        .limit(1);
+      if (existingDelivery?.runId) {
+        throw conflict(
+          "This execution already has a linked continuation. Inspect that run first.",
+          { code: "execution_reconciliation_already_delivered" },
+        );
+      }
+    }
+  }
+
   await db
     .update(nativeRunFinalizations)
     .set({
@@ -256,11 +321,7 @@ export async function markExecutionReconciliation(
       evidence: {
         ...action.evidence,
         automaticRecovery: undefined,
-        executionReconciliation: {
-          ...decision,
-          actorId,
-          recordedAt: new Date().toISOString(),
-        },
+        executionReconciliation: recordedDecision,
         continuationDelivery: deliveryOwner ? "delegated" : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
@@ -271,6 +332,50 @@ export async function markExecutionReconciliation(
         eq(issueRecoveryActions.id, action.id),
       ),
     );
+
+  for (const sibling of siblings) {
+    const { automaticRecovery: _automaticRecovery, ...siblingEvidence } =
+      sibling.evidence;
+    await db
+      .update(issueRecoveryActions)
+      .set({
+        status: "resolved",
+        outcome: "cancelled",
+        resolutionNote:
+          "Duplicate recovery record invalidated by the source run's reconciliation decision.",
+        nextAction:
+          "Duplicate hold cleared. Continuation delivery is owned by the canonical source-run reconciliation.",
+        resolvedAt: sibling.resolvedAt ?? new Date(recordedAt),
+        updatedAt: new Date(recordedAt),
+        evidence: {
+          ...siblingEvidence,
+          executionReconciliation: recordedDecision,
+          continuationDelivery: "invalidated",
+          duplicateOfRecoveryActionId: action.id,
+          duplicateInvalidatedAt: recordedAt,
+        },
+      })
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, action.companyId),
+          eq(issueRecoveryActions.id, sibling.id),
+        ),
+      );
+    await persistActivity(db, {
+      companyId: action.companyId,
+      actorType: "system",
+      actorId: "execution-recovery",
+      action: "issue.execution_recovery_duplicate_invalidated",
+      entityType: "issue",
+      entityId: action.sourceIssueId,
+      runId: decision.runId,
+      details: {
+        recoveryActionId: sibling.id,
+        canonicalRecoveryActionId: action.id,
+        sourceRunId: decision.runId,
+      },
+    });
+  }
 }
 
 export async function deliverReconciledExecutions(
@@ -286,6 +391,7 @@ export async function deliverReconciledExecutions(
         sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
       ),
     )
+    .orderBy(asc(issueRecoveryActions.createdAt), asc(issueRecoveryActions.id))
     .limit(25);
   for (const action of pending) {
     try {
@@ -321,11 +427,30 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
+      const sourceRunKey = executionReconciliationIdempotencyKey(
+        action.companyId,
+        decision.runId,
+      );
+      const legacyRunKey = legacyExecutionReconciliationIdempotencyKey(
+        action.id,
+      );
+      const [legacyReceipt] = await db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, action.companyId),
+            eq(agentWakeupRequests.agentId, action.returnOwnerAgentId),
+            eq(agentWakeupRequests.idempotencyKey, legacyRunKey),
+            ne(agentWakeupRequests.status, "skipped"),
+          ),
+        )
+        .limit(1);
       const run = await wake(action.returnOwnerAgentId, {
         source: "automation",
         triggerDetail: "system",
         reason: "issue_recovery_action_restored",
-        idempotencyKey: `execution-reconciliation:${action.id}`,
+        idempotencyKey: legacyReceipt ? legacyRunKey : sourceRunKey,
         payload: { issueId: task.id, recoveryActionId: action.id },
         requestedByActorType: "system",
         requestedByActorId: "execution-recovery",
@@ -542,6 +667,27 @@ export async function settleUnrecoverableExecutions(
             !coordinator.failureDetail?.replacementDenied)
         )
           return;
+        const [sameRunRecoveryOwner] = await tx
+          .select()
+          .from(issueRecoveryActions)
+          .where(
+            and(
+              eq(issueRecoveryActions.companyId, action.companyId),
+              eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+              ne(issueRecoveryActions.id, action.id),
+              sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+              or(
+                sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+                sql`${issueRecoveryActions.evidence}->>'continuationDelivery' in ('pending', 'delivered')`,
+              ),
+            ),
+          )
+          .orderBy(
+            sql`case when ${issueRecoveryActions.evidence}->>'continuationDelivery' in ('pending', 'delivered') then 0 else 1 end`,
+            asc(issueRecoveryActions.createdAt),
+          )
+          .limit(1)
+          .for("update");
         const current =
           !isSupersededConversationRun(task, run) &&
           action.returnOwnerAgentId !== null &&
@@ -549,6 +695,64 @@ export async function settleUnrecoverableExecutions(
           !["done", "cancelled"].includes(task.status) &&
           (!task.executionRunId || task.executionRunId === run.id) &&
           (!task.checkoutRunId || task.checkoutRunId === run.id);
+        if (sameRunRecoveryOwner) {
+          const continuationOwned = ["pending", "delivered"].includes(
+            String(sameRunRecoveryOwner.evidence.continuationDelivery),
+          );
+          if (current) {
+            await tx
+              .update(issues)
+              .set({
+                ...(continuationOwned ? {} : { status: "blocked" as const }),
+                executionRunId: null,
+                checkoutRunId: null,
+                updatedAt: now,
+              })
+              .where(eq(issues.id, task.id));
+          }
+          const { automaticRecovery: _automaticRecovery, ...candidateEvidence } =
+            action.evidence;
+          await tx
+            .update(issueRecoveryActions)
+            .set({
+              status: "resolved",
+              outcome: "cancelled",
+              resolvedAt: now,
+              updatedAt: now,
+              nextAction:
+                "Duplicate source-run recovery record folded into its canonical owner.",
+              resolutionNote:
+                "A recovery record for the same stopped execution already owns reconciliation and continuation delivery.",
+              wakePolicy: null,
+              monitorPolicy: null,
+              evidence: {
+                ...candidateEvidence,
+                duplicateOfRecoveryActionId: sameRunRecoveryOwner.id,
+                duplicateInvalidatedAt: now.toISOString(),
+              },
+            })
+            .where(eq(issueRecoveryActions.id, action.id));
+          await persistActivity(tx as unknown as Db, {
+            companyId: run.companyId,
+            actorType: "system",
+            actorId: "execution-recovery",
+            action: "issue.execution_recovery_duplicate_invalidated",
+            entityType: "issue",
+            entityId: task.id,
+            runId: run.id,
+            details: {
+              recoveryActionId: action.id,
+              canonicalRecoveryActionId: sameRunRecoveryOwner.id,
+              sourceRunId: run.id,
+              phase: "automatic_settlement",
+            },
+          });
+          await tx
+            .update(heartbeatRuns)
+            .set({ executionStatusDeliveryId: randomUUID() })
+            .where(eq(heartbeatRuns.id, run.id));
+          return;
+        }
         const note = current
           ? "Automatic recovery stopped. Recorded work is preserved; actions with unverified outcomes will not be repeated."
           : "Recovery closed because the task's owner, execution, or status changed. No work was replayed.";

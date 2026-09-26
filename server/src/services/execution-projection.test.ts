@@ -85,7 +85,7 @@ describe("execution truth projection", () => {
     expect(source.status).toBe("failed");
   });
 
-  it("shows a reconciled continuation as queued until its durable delivery is recorded", () => {
+  it("shows a reconciled continuation as pending until its durable delivery is recorded", () => {
     const action = {
       cause: "native_session_retry_exhausted",
       nextAction: "Old recovery action",
@@ -104,8 +104,8 @@ describe("execution truth projection", () => {
         now,
       ),
     ).toMatchObject({
-      phase: "queued",
-      label: "Continuation queued",
+      phase: "recovery_needed",
+      label: "Continuation pending",
       cause: null,
     });
     expect(

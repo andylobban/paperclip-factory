@@ -1613,6 +1613,14 @@ retry budget. Existing pause, approval, budget, ownership, and dependency gates
 remain in effect. See `doc/execution-semantics.md` for admission and stop-proof
 requirements.
 
+Stopped-execution reconciliation and its continuation are source-run scoped.
+Historical duplicate recovery records for the same company, task, and stopped
+run must collapse to one reconciliation owner and at most one durable successor.
+Reconciling that owner invalidates sibling holds atomically; it never turns each
+duplicate record into a separate continuation. A continuation remains pending
+until a successor run is durably linked and must not be presented as queued
+before that link exists.
+
 ### Managed AI authentication
 
 AI credentials can be adopted into the existing Connections system. A typed

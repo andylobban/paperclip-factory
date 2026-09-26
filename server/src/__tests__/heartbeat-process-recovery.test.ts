@@ -3731,6 +3731,64 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toHaveLength(1);
   });
 
+  it("folds a later same-run recovery action into the settled no-replay owner", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      adapterType: "process",
+      agentStatus: "running",
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.drainRunningRunsForShutdown("SIGTERM");
+    const { settleUnrecoverableExecutions } = await import(
+      "../services/execution-recovery-resolution.js"
+    );
+    await settleUnrecoverableExecutions(db);
+    const [canonical] = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(canonical?.evidence).toMatchObject({
+      automaticRecovery: { replay: "blocked" },
+    });
+
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, issueId));
+    const [duplicate] = await db
+      .insert(issueRecoveryActions)
+      .values({
+        companyId,
+        sourceIssueId: issueId,
+        kind: "active_run_watchdog",
+        status: "active",
+        ownerType: "board",
+        returnOwnerAgentId: agentId,
+        cause: canonical!.cause,
+        fingerprint: `duplicate:${runId}`,
+        evidence: { runId },
+        nextAction: "Inspect the stopped execution.",
+      })
+      .returning();
+
+    await settleUnrecoverableExecutions(db);
+    const rows = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(
+      rows.filter(
+        (row) =>
+          (row.evidence.automaticRecovery as { replay?: string } | undefined)
+            ?.replay === "blocked",
+      ),
+    ).toHaveLength(1);
+    expect(rows.find((row) => row.id === duplicate!.id)).toMatchObject({
+      status: "resolved",
+      outcome: "cancelled",
+      evidence: { duplicateOfRecoveryActionId: canonical!.id },
+    });
+    expect(
+      await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId)),
+    ).toEqual([{ status: "blocked" }]);
+  });
+
   it("does not reset an exhausted incident budget on server restart", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "running",

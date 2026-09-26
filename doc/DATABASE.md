@@ -432,3 +432,10 @@ cleanup authority; it does not prove that remote inference has stopped. Recovery
 revokes the previous boot identity with a conditional update. Its own claim also
 expires so another sweep can finish cleanup after a restart. Historical rows keep
 null ownership fields and follow the previous recovery path.
+
+Stopped-execution no-replay holds are unique by company, issue, and source run.
+The reconciliation worker uses the same source-run identity for its durable wake
+key, while accepting legacy action-scoped receipts created before the invariant
+was introduced. Migration repair preserves one canonical historical hold or
+pending continuation, invalidates same-run duplicates without replaying them,
+and retains their evidence for inspection.

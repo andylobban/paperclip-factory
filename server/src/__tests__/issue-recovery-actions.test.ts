@@ -28,12 +28,18 @@ import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { executionReconciliationIdempotencyKey } from "../services/execution-reconciliation-identity.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+function reconciliationKey(action: { companyId: string; evidence: Record<string, unknown> }) {
+  const decision = action.evidence.executionReconciliation as { runId: string };
+  return executionReconciliationIdempotencyKey(action.companyId, decision.runId);
+}
 
 function makeRecoveryActionRow(overrides: Record<string, unknown> = {}) {
   const now = new Date("2026-05-09T19:30:00.000Z");
@@ -1751,6 +1757,75 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(agentWakeupRequests)).toEqual(beforeRepeat.wakes);
   });
 
+  it("makes one recovery action the source-run owner and invalidates a pending duplicate", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    const decision = {
+      runId,
+      providerStopped: true as const,
+      actionOutcome: "not_performed" as const,
+      outcomeEvidence:
+        "Provider receipts confirm the action was never submitted before the process stopped.",
+    };
+    const [duplicate] = await db
+      .insert(issueRecoveryActions)
+      .values({
+        companyId,
+        sourceIssueId,
+        kind: "active_run_watchdog",
+        status: "resolved",
+        outcome: "restored",
+        ownerType: "board",
+        returnOwnerAgentId: coderId,
+        cause: "uncertain_external_action",
+        fingerprint: `duplicate:${runId}`,
+        nextAction: "Continue from the duplicate reconciliation.",
+        evidence: {
+          runId,
+          executionReconciliation: decision,
+          continuationDelivery: "pending",
+        },
+      })
+      .returning();
+
+    const app = createApp();
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: decision,
+      })
+      .expect(200);
+
+    const rows = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
+    const canonical = rows.find((row) => row.id === action.id)!;
+    const invalidated = rows.find((row) => row.id === duplicate!.id)!;
+    expect(canonical.evidence).toMatchObject({
+      continuationDelivery: "pending",
+      executionReconciliation: decision,
+    });
+    expect(invalidated).toMatchObject({
+      status: "resolved",
+      outcome: "cancelled",
+    });
+    expect(invalidated.evidence).toMatchObject({
+      continuationDelivery: "invalidated",
+      duplicateOfRecoveryActionId: action.id,
+      executionReconciliation: decision,
+    });
+
+    expect(
+      rows.filter(
+        (row) => row.evidence.continuationDelivery === "pending",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("rejects malformed and mismatched reconciliation evidence without mutating the hold", async () => {
     const { sourceIssueId, runId, action } = await seedAutomaticNoReplayHold();
     const app = createApp();
@@ -1911,7 +1986,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .where(
         eq(
           agentWakeupRequests.idempotencyKey,
-          `execution-reconciliation:${action.id}`,
+          reconciliationKey(action),
         ),
       );
     expect(wakes).toHaveLength(1);
@@ -1949,7 +2024,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .where(
         eq(
           agentWakeupRequests.idempotencyKey,
-          `execution-reconciliation:${action.id}`,
+          reconciliationKey(action),
         ),
       );
     expect(wakes).toHaveLength(1);
@@ -2014,7 +2089,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
           .where(
             eq(
               agentWakeupRequests.idempotencyKey,
-              `execution-reconciliation:${action.id}`,
+              reconciliationKey(action),
             ),
           ),
       ).toHaveLength(0);
@@ -2046,7 +2121,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         .where(
           eq(
             agentWakeupRequests.idempotencyKey,
-            `execution-reconciliation:${action.id}`,
+            reconciliationKey(action),
           ),
         ),
     ).toHaveLength(0);
@@ -2066,7 +2141,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .where(
         eq(
           agentWakeupRequests.idempotencyKey,
-          `execution-reconciliation:${action.id}`,
+          reconciliationKey(action),
         ),
       );
     expect(wakes).toHaveLength(1);

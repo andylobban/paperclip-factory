@@ -64,5 +64,16 @@ export const issueRecoveryActions = pgTable(
     activeFingerprintIdx: uniqueIndex("issue_recovery_actions_active_fingerprint_uq")
       .on(table.companyId, table.sourceIssueId, table.cause, table.fingerprint)
       .where(sql`${table.status} in ('active', 'escalated')`),
+    effectiveExecutionHoldIdx: uniqueIndex(
+      "issue_recovery_actions_effective_execution_hold_uq",
+    )
+      .on(
+        table.companyId,
+        table.sourceIssueId,
+        sql`(${table.evidence}->>'runId')`,
+      )
+      .where(
+        sql`${table.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+      ),
   }),
 );

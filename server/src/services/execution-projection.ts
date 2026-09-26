@@ -213,10 +213,10 @@ export function projectExecution(
     projection.cause = null;
     projection.nextAction = deliveredRunId
       ? null
-      : "The previous execution is reconciled. Its continuation is queued for delivery.";
+      : "The previous execution is reconciled. Its continuation is pending durable delivery.";
     return set(
-      deliveredRunId ? "completed" : "queued",
-      deliveredRunId ? "Continued in another run" : "Continuation queued",
+      deliveredRunId ? "completed" : "recovery_needed",
+      deliveredRunId ? "Continued in another run" : "Continuation pending",
     );
   }
   if (

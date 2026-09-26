@@ -16,6 +16,10 @@ import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
+import {
+  executionReconciliationIdempotencyKey,
+  legacyExecutionReconciliationIdempotencyKey,
+} from "./execution-reconciliation-identity.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -26883,7 +26887,6 @@ export function heartbeatService(
               reason !== "issue_recovery_action_restored" ||
               opts.requestedByActorType !== "system" ||
               opts.requestedByActorId !== "execution-recovery" ||
-              opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
               enrichedContextSnapshot.forceFreshSession !== true ||
               payload?.issueId !== issue.id ||
@@ -26911,6 +26914,16 @@ export function heartbeatService(
               action?.evidence.executionReconciliation,
             );
             const sourceRunId = readNonEmptyString(decision.runId);
+            const reconciliationIdempotencyKey = opts.idempotencyKey ?? "";
+            const validIdempotencyKey = sourceRunId
+              ? [
+                  executionReconciliationIdempotencyKey(
+                    issue.companyId,
+                    sourceRunId,
+                  ),
+                  legacyExecutionReconciliationIdempotencyKey(actionId),
+                ].includes(reconciliationIdempotencyKey)
+              : false;
             if (
               !action ||
               action.status !== "resolved" ||
@@ -26918,6 +26931,7 @@ export function heartbeatService(
               action.returnOwnerAgentId !== agentId ||
               !sourceRunId ||
               !isUuidLike(sourceRunId) ||
+              !validIdempotencyKey ||
               decision.providerStopped !== true ||
               !["completed", "not_performed", "mixed"].includes(
                 String(decision.actionOutcome),
@@ -26938,7 +26952,10 @@ export function heartbeatService(
                 and(
                   eq(agentWakeupRequests.companyId, issue.companyId),
                   eq(agentWakeupRequests.agentId, agentId),
-                  eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+                  eq(
+                    agentWakeupRequests.idempotencyKey,
+                    reconciliationIdempotencyKey,
+                  ),
                   ne(agentWakeupRequests.status, "skipped"),
                 ),
               )
