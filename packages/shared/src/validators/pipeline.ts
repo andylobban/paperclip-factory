@@ -44,6 +44,11 @@ export const pipelineStageAutomationSchema = z.object({
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
 }).passthrough();
 
+export const pipelineStageRequiredOutputSchema = z.object({
+  kind: z.enum(["document", "work_product", "attachment"]),
+  key: z.string().trim().min(1).max(200).optional(),
+});
+
 export const pipelineStageCarryOverPolicySchema = z.object({
   version: z.literal(1).default(1),
   mode: z.enum(["all_except", "only"]).default("all_except"),
@@ -113,6 +118,7 @@ export const pipelineStageConfigSchema = z.object({
   requireRequestChangesReason: z.boolean().optional(),
   requireChildrenTerminal: z.boolean().optional(),
   requireNoUnresolvedDrift: z.boolean().optional(),
+  requiredOutputs: z.array(pipelineStageRequiredOutputSchema).max(20).optional().default([]),
 }).passthrough().superRefine((value, ctx) => {
   const keys = new Set<string>();
   value.variables.forEach((variable, index) => {
@@ -150,6 +156,7 @@ export type PipelineStageKind = z.infer<typeof pipelineStageKindSchema>;
 export type PipelineStageApprover = z.infer<typeof pipelineStageApproverSchema>;
 export type PipelineStageOnEnter = z.infer<typeof pipelineStageOnEnterSchema>;
 export type PipelineStageAutomationConfig = z.infer<typeof pipelineStageAutomationSchema>;
+export type PipelineStageRequiredOutput = z.infer<typeof pipelineStageRequiredOutputSchema>;
 export type PipelineStageCarryOverPolicy = z.infer<typeof pipelineStageCarryOverPolicySchema>;
 export type PipelineStageBreakdown = z.infer<typeof pipelineStageBreakdownSchema>;
 export type PipelineStageVariable = z.infer<typeof pipelineStageVariableSchema>;

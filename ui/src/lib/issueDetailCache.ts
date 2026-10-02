@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { Issue, IssueComment } from "@paperclipai/shared";
-import { issuesApi } from "@/api/issues";
+import { issuesApi, type IssueDetailResponse } from "@/api/issues";
 import { queryKeys } from "@/lib/queryKeys";
 import { getNextIssueCommentPageParam, ISSUE_COMMENT_PAGE_SIZE } from "@/lib/optimistic-issue-comments";
 
@@ -58,7 +58,10 @@ function isCompleteIssueSnapshot(value: unknown): value is Issue {
   );
 }
 
-function mergeIssueSnapshots(existing: Issue | undefined, incoming: Issue): Issue {
+function mergeIssueSnapshots(
+  existing: IssueDetailResponse | undefined,
+  incoming: IssueDetailResponse,
+): IssueDetailResponse {
   if (!existing) return incoming;
   return {
     ...existing,
@@ -74,15 +77,15 @@ export function getCachedIssueDetail(
   queryClient: QueryClient,
   issueRef: string | null | undefined,
   issue?: Pick<Issue, "id" | "identifier"> | null,
-): Issue | undefined {
+): IssueDetailResponse | undefined {
   const refs = collectIssueRefs(issueRef, issue);
 
   for (const ref of refs) {
-    const cached = queryClient.getQueryData<Issue>(queryKeys.issues.detail(ref));
+    const cached = queryClient.getQueryData<IssueDetailResponse>(queryKeys.issues.detail(ref));
     if (isCompleteIssueSnapshot(cached)) return cached;
   }
 
-  const cachedEntries = queryClient.getQueriesData<Issue>({ queryKey: ISSUE_DETAIL_QUERY_PREFIX });
+  const cachedEntries = queryClient.getQueriesData<IssueDetailResponse>({ queryKey: ISSUE_DETAIL_QUERY_PREFIX });
   return cachedEntries
     .map(([, cachedIssue]) => cachedIssue)
     .find((cachedIssue): cachedIssue is Issue =>
@@ -92,18 +95,18 @@ export function getCachedIssueDetail(
 
 export function seedIssueDetailCache(
   queryClient: QueryClient,
-  issue: Issue,
+  issue: IssueDetailResponse,
   options?: {
     issueRef?: string | null;
   },
-): Issue {
+): IssueDetailResponse {
   if (!isCompleteIssueSnapshot(issue)) return issue;
 
   const refs = collectIssueRefs(options?.issueRef, issue);
   const merged = mergeIssueSnapshots(getCachedIssueDetail(queryClient, options?.issueRef, issue), issue);
 
   for (const ref of refs) {
-    queryClient.setQueryData<Issue>(
+    queryClient.setQueryData<IssueDetailResponse>(
       queryKeys.issues.detail(ref),
       (existing) => mergeIssueSnapshots(existing, merged),
     );
@@ -116,7 +119,7 @@ export async function fetchIssueDetail(
   queryClient: QueryClient,
   issueRef: string,
   options?: { signal?: AbortSignal },
-): Promise<Issue> {
+): Promise<IssueDetailResponse> {
   const issue = options ? await issuesApi.get(issueRef, options) : await issuesApi.get(issueRef);
   return seedIssueDetailCache(queryClient, issue, { issueRef });
 }

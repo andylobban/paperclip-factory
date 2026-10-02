@@ -438,6 +438,30 @@ async function listIssueLinkedCases(
         eq(pipelines.companyId, companyId),
       ),
     );
+  const caseIds = [...new Set(rows.map((row) => row.case.id))];
+  const chainRows = caseIds.length === 0
+    ? []
+    : await db
+      .select({
+        link: pipelineCaseIssueLinks,
+        issue: issueRows,
+      })
+      .from(pipelineCaseIssueLinks)
+      .innerJoin(issueRows, eq(pipelineCaseIssueLinks.issueId, issueRows.id))
+      .where(and(
+        eq(pipelineCaseIssueLinks.companyId, companyId),
+        inArray(pipelineCaseIssueLinks.caseId, caseIds),
+        eq(issueRows.companyId, companyId),
+        isNull(issueRows.hiddenAt),
+      ))
+      .orderBy(asc(pipelineCaseIssueLinks.createdAt), asc(pipelineCaseIssueLinks.id));
+  const chainByCaseId = new Map<string, typeof chainRows>();
+  for (const chainRow of chainRows) {
+    const existing = chainByCaseId.get(chainRow.link.caseId) ?? [];
+    existing.push(chainRow);
+    chainByCaseId.set(chainRow.link.caseId, existing);
+  }
+
   return rows.map((row) => ({
     id: row.case.id,
     caseKey: row.case.caseKey,
@@ -455,6 +479,15 @@ async function listIssueLinkedCases(
       name: row.stage.name,
       kind: row.stage.kind,
     },
+    issues: (chainByCaseId.get(row.case.id) ?? []).map((chainRow) => ({
+      id: chainRow.issue.id,
+      identifier: chainRow.issue.identifier,
+      title: chainRow.issue.title,
+      status: chainRow.issue.status,
+      role: chainRow.link.role,
+      retiredAt: chainRow.link.retiredAt,
+      current: chainRow.issue.id === issueId,
+    })),
   }));
 }
 

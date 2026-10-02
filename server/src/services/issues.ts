@@ -63,6 +63,8 @@ import {
   issueWorkProducts,
   issueReadStates,
   issueThreadInteractions,
+  pipelineAutomationExecutions,
+  pipelineCaseEvents,
   pipelineCaseIssueLinks,
   pipelineCases,
   pipelineStages,
@@ -10934,6 +10936,60 @@ export function issueService(db: Db) {
               },
             );
           }
+          if (patch.status === "done") {
+            const activeStageAutomation = await tx
+              .select({
+              caseId: pipelineCases.id,
+              caseKey: pipelineCases.caseKey,
+              pipelineId: pipelines.id,
+              pipelineKey: pipelines.key,
+              stageId: pipelineStages.id,
+              stageKey: pipelineStages.key,
+              automationAttemptId: pipelineAutomationExecutions.id,
+            })
+            .from(pipelineCaseIssueLinks)
+            .innerJoin(pipelineCases, eq(pipelineCaseIssueLinks.caseId, pipelineCases.id))
+            .innerJoin(pipelines, eq(pipelineCases.pipelineId, pipelines.id))
+            .innerJoin(pipelineStages, eq(pipelineCases.stageId, pipelineStages.id))
+            .innerJoin(
+              pipelineAutomationExecutions,
+              eq(pipelineCaseIssueLinks.automationAttemptId, pipelineAutomationExecutions.id),
+            )
+            .innerJoin(
+              pipelineCaseEvents,
+              eq(pipelineAutomationExecutions.triggeringEventId, pipelineCaseEvents.id),
+            )
+            .where(and(
+              eq(pipelineCaseIssueLinks.companyId, receiptExisting.companyId),
+              eq(pipelineCaseIssueLinks.issueId, receiptExisting.id),
+              eq(pipelineCaseIssueLinks.role, "automation"),
+              isNull(pipelineCaseIssueLinks.retiredAt),
+              eq(pipelineCases.companyId, receiptExisting.companyId),
+              isNull(pipelineCases.terminalKind),
+              isNull(pipelineCases.retiredAt),
+              eq(pipelineCaseEvents.toStageId, pipelineCases.stageId),
+            ))
+            .for("update")
+            .limit(1)
+              .then((rows: Array<{
+                caseId: string;
+                caseKey: string;
+                pipelineId: string;
+                pipelineKey: string;
+                stageId: string;
+                stageKey: string;
+                automationAttemptId: string;
+              }>) => rows[0] ?? null);
+            if (activeStageAutomation) {
+              throw conflict(
+                "Automation task cannot close before its pipeline case leaves the current stage",
+                {
+                  code: "pipeline_stage_incomplete",
+                  ...activeStageAutomation,
+                },
+              );
+            }
+          }
         }
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
@@ -10991,6 +11047,81 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        const releasesPipelineLease =
+          receiptExisting.status !== updated.status &&
+          (updated.status === "blocked" || updated.status === "cancelled");
+        if (releasesPipelineLease) {
+          const stageCases = await tx
+            .select({
+              caseId: pipelineCases.id,
+              stageId: pipelineCases.stageId,
+              leaseToken: pipelineCases.leaseToken,
+              leaseOwnerType: pipelineCases.leaseOwnerType,
+              leaseAgentId: pipelineCases.leaseAgentId,
+              leaseUserId: pipelineCases.leaseUserId,
+            })
+            .from(pipelineCaseIssueLinks)
+            .innerJoin(pipelineCases, eq(pipelineCaseIssueLinks.caseId, pipelineCases.id))
+            .innerJoin(
+              pipelineAutomationExecutions,
+              eq(pipelineCaseIssueLinks.automationAttemptId, pipelineAutomationExecutions.id),
+            )
+            .innerJoin(
+              pipelineCaseEvents,
+              eq(pipelineAutomationExecutions.triggeringEventId, pipelineCaseEvents.id),
+            )
+            .where(and(
+              eq(pipelineCaseIssueLinks.companyId, updated.companyId),
+              eq(pipelineCaseIssueLinks.issueId, updated.id),
+              eq(pipelineCaseIssueLinks.role, "automation"),
+              isNull(pipelineCaseIssueLinks.retiredAt),
+              eq(pipelineCases.companyId, updated.companyId),
+              isNull(pipelineCases.terminalKind),
+              isNull(pipelineCases.retiredAt),
+              isNotNull(pipelineCases.leaseToken),
+              eq(pipelineCaseEvents.toStageId, pipelineCases.stageId),
+            ));
+          for (const stageCase of stageCases) {
+            const released = await tx
+              .update(pipelineCases)
+              .set({
+                leaseOwnerType: null,
+                leaseAgentId: null,
+                leaseUserId: null,
+                leaseToken: null,
+                leaseExpiresAt: null,
+                updatedAt: new Date(),
+              })
+              .where(and(
+                eq(pipelineCases.id, stageCase.caseId),
+                eq(pipelineCases.leaseToken, stageCase.leaseToken!),
+              ))
+              .returning({ id: pipelineCases.id });
+            if (released.length === 0) continue;
+            await tx.insert(pipelineCaseEvents).values({
+              companyId: updated.companyId,
+              caseId: stageCase.caseId,
+              type: "lease_released",
+              actorType: "system",
+              actorAgentId: null,
+              actorUserId: null,
+              runId: null,
+              fromStageId: stageCase.stageId,
+              toStageId: stageCase.stageId,
+              payload: {
+                reason: `automation_issue_${updated.status}`,
+                issueId: updated.id,
+                triggeredByAgentId: actorAgentId ?? null,
+                triggeredByUserId: actorUserId ?? null,
+                previousOwner: {
+                  type: stageCase.leaseOwnerType,
+                  agentId: stageCase.leaseAgentId,
+                  userId: stageCase.leaseUserId,
+                },
+              },
+            });
+          }
+        }
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
         if (actorUserId && issueData.status !== undefined) {

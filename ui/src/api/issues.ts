@@ -76,6 +76,38 @@ export type IssueUpdateResponse = Issue & {
   blockedByIssueIds?: string[];
 };
 
+export type IssuePipelineCaseLink = {
+  id: string;
+  caseKey: string;
+  title: string;
+  status: string;
+  role: string;
+  pipeline: {
+    id: string;
+    key: string;
+    name: string;
+  };
+  stage: {
+    id: string;
+    key: string;
+    name: string;
+    kind: string;
+  };
+  issues: Array<{
+    id: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+    role: string;
+    retiredAt: string | null;
+    current: boolean;
+  }>;
+};
+
+export type IssueDetailResponse = Issue & {
+  linkedCases?: IssuePipelineCaseLink[];
+};
+
 export type ResolveRecoveryActionResponse = ResolveIssueRecoveryActionResponse;
 
 export type RecoveryActionDiagnostic = {
@@ -231,8 +263,8 @@ export const issuesApi = {
   deleteLabel: (id: string) => api.delete<IssueLabel>(`/labels/${id}`),
   get: (id: string, options?: RequestOptions) =>
     options
-      ? api.get<Issue>(`/issues/${id}`, options)
-      : api.get<Issue>(`/issues/${id}`),
+      ? api.get<IssueDetailResponse>(`/issues/${id}`, options)
+      : api.get<IssueDetailResponse>(`/issues/${id}`),
   getRunnerGoal: (id: string, agentId?: string | null) => {
     const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : "";
     return api.get<RunnerGoalProjection>(`/issues/${id}/runner-goal${query}`);

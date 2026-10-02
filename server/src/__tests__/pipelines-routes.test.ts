@@ -288,6 +288,18 @@ describeEmbeddedPostgres("pipeline routes", () => {
     const issueDetail = await http.get(`/api/issues/${manualIssue[0]!.id}`).expect(200);
     expect(issueDetail.body.linkedCases).toHaveLength(1);
     expect(issueDetail.body.linkedCases[0].id).toBe(blocked.body.case.id);
+    expect(issueDetail.body.linkedCases[0].issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: conversation.body.issue.id,
+        role: "conversation",
+        current: false,
+      }),
+      expect.objectContaining({
+        id: manualIssue[0]!.id,
+        role: "work",
+        current: true,
+      }),
+    ]));
     await http.delete(`/api/cases/${blocked.body.case.id}/issue-links/${workLink.body.id}`).expect(200);
 
     const [routine] = await db.insert(routines).values({ companyId: company.id, title: "Routine" }).returning();

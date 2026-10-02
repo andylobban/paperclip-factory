@@ -69,6 +69,7 @@ import { caseRoutes } from "./routes/cases.js";
 import { fileResourceRoutes } from "./routes/file-resources.js";
 import { routineRoutes } from "./routes/routines.js";
 import { pipelineRoutes } from "./routes/pipelines.js";
+import { pipelineService } from "./services/pipelines.js";
 import { environmentRoutes } from "./routes/environments.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
@@ -182,6 +183,7 @@ import { createChatWebhookDiagnostics } from "./services/chat-webhook-diagnostic
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
 const CHAT_PUBLICATION_FLUSH_INTERVAL_MS = 1_000;
+const PIPELINE_LIVENESS_RECOVERY_INTERVAL_MS = 60_000;
 const VITE_DEV_ASSET_PREFIXES = [
   "/@fs/",
   "/@id/",
@@ -1119,6 +1121,37 @@ export async function createApp(
 
   jobCoordinator.start();
   scheduler.start();
+  const pipelineLivenessRecovery = pipelineService(db);
+  let pipelineLivenessRecoveryRunning = false;
+  const recoverStrandedPipelineCases = () => {
+    if (pipelineLivenessRecoveryRunning) return;
+    pipelineLivenessRecoveryRunning = true;
+    void pipelineLivenessRecovery
+      .recoverStrandedAutomationCases()
+      .then((recovered) => {
+        if (recovered.length > 0) {
+          logger.warn(
+            { recovered },
+            "restored pipeline automation cases with no action path",
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "pipeline liveness recovery sweep failed");
+      })
+      .finally(() => {
+        pipelineLivenessRecoveryRunning = false;
+      });
+  };
+  let pipelineLivenessRecoveryTimer: ReturnType<typeof setInterval> | null =
+    process.env.NODE_ENV === "test"
+      ? null
+      : setInterval(
+          recoverStrandedPipelineCases,
+          PIPELINE_LIVENESS_RECOVERY_INTERVAL_MS,
+        );
+  pipelineLivenessRecoveryTimer?.unref?.();
+  if (pipelineLivenessRecoveryTimer) recoverStrandedPipelineCases();
   let feedbackExportShuttingDown = false;
   let feedbackExportTimer: ReturnType<typeof setInterval> | null = null;
   const disableFeedbackExportFlushes = () => {
@@ -1309,6 +1342,10 @@ export async function createApp(
       // awaited teardown, so no tick runs after the caller ends the pool.
       scheduler.stop();
       jobCoordinator.stop();
+      if (pipelineLivenessRecoveryTimer) {
+        clearInterval(pipelineLivenessRecoveryTimer);
+        pipelineLivenessRecoveryTimer = null;
+      }
       disableFeedbackExportFlushes();
       unsubscribeChatPublicationSignals();
       chatReconciliation.stop();

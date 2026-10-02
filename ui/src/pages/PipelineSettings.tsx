@@ -117,6 +117,10 @@ import { getPipelineStageColumnTone } from "../lib/pipeline-stage-presentation";
 type StageSectionKey = "instructions" | "advanced" | "secrets" | "activity" | "history";
 type ApproverKind = "any_human" | "user" | "agent";
 type EditableStageKind = "working" | "review" | "done" | "cancelled";
+type RequiredStageOutput = {
+  kind: "document" | "work_product" | "attachment";
+  key?: string;
+};
 
 type StageConfig = {
   // Stage instruction variables are stored in the routine variable shape
@@ -156,6 +160,7 @@ type StageConfig = {
   requireRejectReason?: boolean;
   requireRequestChangesReason?: boolean;
   requireChildrenTerminal?: boolean;
+  requiredOutputs?: RequiredStageOutput[];
   autoAdvanceOnChildrenTerminal?: string;
   [key: string]: unknown;
 };
@@ -727,6 +732,7 @@ type StageFormValues = {
   requireRejectReason: boolean;
   requireRequestChangesReason: boolean;
   requireChildrenTerminal: boolean;
+  requiredOutputsText: string;
   autoAdvanceOnChildrenTerminal: string;
   breakdownEnabled: boolean;
   breakdownTargetPipelineId: string;
@@ -746,6 +752,38 @@ type StageFormValues = {
 };
 
 type PipelineTransitionRecord = { fromStageId: string; toStageId: string; label?: string | null };
+
+export function formatRequiredStageOutputs(outputs: unknown): string {
+  if (!Array.isArray(outputs)) return "";
+  return outputs.flatMap((output) => {
+    if (!output || typeof output !== "object" || Array.isArray(output)) return [];
+    const kind = (output as { kind?: unknown }).kind;
+    if (kind !== "document" && kind !== "work_product" && kind !== "attachment") return [];
+    const key = (output as { key?: unknown }).key;
+    return [`${kind}${typeof key === "string" && key.trim() ? `:${key.trim()}` : ""}`];
+  }).join("\n");
+}
+
+export function parseRequiredStageOutputs(value: string): RequiredStageOutput[] {
+  const seen = new Set<string>();
+  return value.split(/\r?\n/).flatMap((rawLine, index) => {
+    const line = rawLine.trim();
+    if (!line) return [];
+    const separator = line.indexOf(":");
+    const kind = (separator < 0 ? line : line.slice(0, separator)).trim();
+    const key = separator < 0 ? "" : line.slice(separator + 1).trim();
+    if (kind !== "document" && kind !== "work_product" && kind !== "attachment") {
+      throw new Error(`Required output line ${index + 1} must start with document, work_product, or attachment.`);
+    }
+    if (key.length > 200) {
+      throw new Error(`Required output line ${index + 1} has a key longer than 200 characters.`);
+    }
+    const fingerprint = `${kind}:${key || "*"}`;
+    if (seen.has(fingerprint)) return [];
+    seen.add(fingerprint);
+    return [{ kind, ...(key ? { key } : {}) }];
+  });
+}
 
 function computeStageForm(
   stage: PipelineStage,
@@ -768,6 +806,7 @@ function computeStageForm(
     requireRejectReason: config.requireRejectReason ?? true,
     requireRequestChangesReason: config.requireRequestChangesReason ?? true,
     requireChildrenTerminal: config.requireChildrenTerminal === true,
+    requiredOutputsText: formatRequiredStageOutputs(config.requiredOutputs),
     autoAdvanceOnChildrenTerminal:
       typeof config.autoAdvanceOnChildrenTerminal === "string" ? config.autoAdvanceOnChildrenTerminal : "",
     breakdownEnabled: breakdown !== null,
@@ -1311,6 +1350,7 @@ export function PipelineSettings() {
   const [requireRejectReason, setRequireRejectReason] = useState(true);
   const [requireRequestChangesReason, setRequireRequestChangesReason] = useState(true);
   const [requireChildrenTerminal, setRequireChildrenTerminal] = useState(false);
+  const [requiredOutputsText, setRequiredOutputsText] = useState("");
   const [autoAdvanceOnChildrenTerminal, setAutoAdvanceOnChildrenTerminal] = useState("");
   const [breakdownEnabled, setBreakdownEnabled] = useState(false);
   const [breakdownTargetPipelineId, setBreakdownTargetPipelineId] = useState("");
@@ -1691,6 +1731,7 @@ export function PipelineSettings() {
     setRequireRejectReason(form.requireRejectReason);
     setRequireRequestChangesReason(form.requireRequestChangesReason);
     setRequireChildrenTerminal(form.requireChildrenTerminal);
+    setRequiredOutputsText(form.requiredOutputsText);
     setAutoAdvanceOnChildrenTerminal(form.autoAdvanceOnChildrenTerminal);
     setBreakdownEnabled(form.breakdownEnabled);
     setBreakdownTargetPipelineId(form.breakdownTargetPipelineId);
@@ -1803,6 +1844,7 @@ export function PipelineSettings() {
           ? { kind: parsedApproval.kind, id: parsedApproval.id }
           : { kind: "any_human" },
         requireChildrenTerminal,
+        requiredOutputs: parseRequiredStageOutputs(requiredOutputsText),
       };
       if (autoAdvanceOnChildrenTerminal) {
         config.autoAdvanceOnChildrenTerminal = autoAdvanceOnChildrenTerminal;
@@ -2179,6 +2221,7 @@ export function PipelineSettings() {
         requireRejectReason,
         requireRequestChangesReason,
         requireChildrenTerminal,
+        requiredOutputsText,
         autoAdvanceOnChildrenTerminal,
         breakdownEnabled,
         breakdownTargetPipelineId,
@@ -3194,6 +3237,28 @@ export function PipelineSettings() {
                         </FieldRow>
                         {strictTransitionsEnabled ? transitionTargetsControl : null}
                       </div>
+                      {isPipelineTerminalStageKind(stageKind) ? null : (
+                        <div className="divide-y divide-border border-b border-border">
+                          <div className="py-3">
+                            <h3 className="text-sm font-semibold text-foreground">Completion evidence</h3>
+                          </div>
+                          <FieldRow label="Required outputs">
+                            <div className="space-y-2">
+                              <textarea
+                                aria-label="Required stage outputs"
+                                value={requiredOutputsText}
+                                onChange={(event) => setRequiredOutputsText(event.target.value)}
+                                placeholder={"document:product_brief\nwork_product:architecture\nattachment"}
+                                rows={4}
+                                className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+                              />
+                              <p className="max-w-2xl text-sm text-muted-foreground">
+                                One per line. Use document, work_product, or attachment, optionally followed by a key after a colon. Items cannot leave this step until every output is registered.
+                              </p>
+                            </div>
+                          </FieldRow>
+                        </div>
+                      )}
                       {isPipelineTerminalStageKind(stageKind) ? null : breakdownEnabled ? (
                         <EmptyState
                           icon={SlidersHorizontal}

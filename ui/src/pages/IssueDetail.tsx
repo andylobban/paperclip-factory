@@ -6,6 +6,7 @@ import { Settings as ChatSettings } from "lucide-react";
 import { agentDetailHref } from "./agent-detail-navigation";
 import { deriveInitials } from "@/components/Identity";
 import { ExecutionBlockerNotice } from "../components/ExecutionBlockerNotice";
+import { IssuePipelineChain } from "../components/IssuePipelineChain";
 import type { TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
 import { EmailThreadProvider } from "../components/EmailMessageCard";
@@ -7300,6 +7301,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           }}
         />
       )}
+
+      <IssuePipelineChain linkedCases={queriedIssue?.linkedCases ?? []} />
     </div>
   );
 

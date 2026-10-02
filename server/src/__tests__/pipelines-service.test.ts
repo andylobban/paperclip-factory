@@ -10,6 +10,7 @@ import {
   heartbeatRuns,
   instanceSettings,
   issueComments,
+  issueRelations,
   issueThreadInteractions,
   issues,
   pipelineAutomationExecutions,
@@ -31,6 +32,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   PIPELINE_AUTOMATION_DEFAULT_TITLE_TEMPLATE,
+  ensurePipelineCaseBodyDocumentFromSummary,
   pipelineService,
   type PipelineActor,
 } from "../services/pipelines.ts";
@@ -333,16 +335,47 @@ describeEmbeddedPostgres("pipelineService", () => {
       },
     });
 
+    await db.update(issues).set({
+      status: "blocked",
+      unblockDescriptor: { owner: "board", action: "Manually advance the pipeline" },
+      blockedTransitionAt: new Date(),
+    }).where(eq(issues.id, originIssue!.id));
+    const [finishedBlocker] = await db.insert(issues).values({
+      companyId: company.id,
+      title: "Finished prerequisite",
+      status: "done",
+      priority: "medium",
+    }).returning();
+    await db.insert(issueRelations).values({
+      companyId: company.id,
+      issueId: finishedBlocker!.id,
+      relatedIssueId: originIssue!.id,
+      type: "blocks",
+    });
+    const active = await svc.transitionCase({
+      companyId: company.id,
+      caseId: first.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: first.case.version,
+      actor: userActor,
+    });
+    const [reconciledActiveOrigin] = await db.select().from(issues).where(eq(issues.id, originIssue!.id));
+    expect(reconciledActiveOrigin).toMatchObject({
+      status: "in_progress",
+      unblockDescriptor: null,
+      blockedTransitionAt: null,
+    });
+    expect(await db.select().from(issueRelations)).toHaveLength(0);
+
     await svc.transitionCase({
       companyId: company.id,
       caseId: first.case.id,
       toStageKey: "done",
-      expectedVersion: first.case.version,
+      expectedVersion: active.case.version,
       actor: userActor,
     });
-    await expect(
-      issueService(db).update(originIssue!.id, { status: "done" }),
-    ).resolves.toMatchObject({ status: "done" });
+    const [reconciledTerminalOrigin] = await db.select().from(issues).where(eq(issues.id, originIssue!.id));
+    expect(reconciledTerminalOrigin).toMatchObject({ status: "done" });
   });
 
   it("rejects conflicting or cross-company origin issue enrolment without creating a case", async () => {
@@ -514,7 +547,54 @@ describeEmbeddedPostgres("pipelineService", () => {
       actor: owner,
     });
     expect(transitioned.case.version).toBe(2);
-    expect(await eventCount(created.case.id)).toBe(3);
+    expect(transitioned.case.leaseToken).toBeNull();
+    expect(await eventCount(created.case.id)).toBe(4);
+  });
+
+  it("requires configured stage outputs before transition", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("intake")!.id,
+      patch: { config: { requiredOutputs: [{ kind: "document", key: "body" }] } },
+      actor: userActor,
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "required-output",
+      title: "Required output",
+      actor: userActor,
+    });
+
+    await expect(svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    })).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "required_outputs_missing",
+        missing: [{ kind: "document", key: "body" }],
+      },
+    });
+
+    await ensurePipelineCaseBodyDocumentFromSummary(db, {
+      companyId: company.id,
+      caseId: created.case.id,
+      summary: "# Required delivery\n\nReady for the next stage.",
+      actor: userActor,
+    });
+    await expect(svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    })).resolves.toMatchObject({ case: { stageId: byKey.get("in_progress")!.id } });
   });
 
   it("expires leases on read before a new claim", async () => {
@@ -1232,7 +1312,13 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(freshRoot!.terminalKind).toBe("done");
     expect(freshRoot!.leaseToken).toBeNull();
     const rootEvents = await svc.listCaseEvents(company.id, root.case.id);
-    expect(rootEvents.map((event) => event.type)).toEqual(["ingested", "claimed", "children_terminal", "transitioned"]);
+    expect(rootEvents.map((event) => event.type)).toEqual([
+      "ingested",
+      "claimed",
+      "children_terminal",
+      "transitioned",
+      "lease_released",
+    ]);
   });
 
   it("keeps child completion committed when parent children-terminal auto-advance is gated", async () => {
@@ -1436,6 +1522,26 @@ describeEmbeddedPostgres("pipelineService", () => {
     const [issue] = await db.select().from(issues).where(eq(issues.id, ledgers[0]!.executionIssueId!));
     expect(issue!.description).toContain("Pipeline Case Context");
     expect(issue!.description).toContain("untrustedContent");
+    expect(issue!.description).toContain("GET /api/skills/pipeline-case-operations");
+    expect(issue!.description).toContain("POST transition -> only then close");
+    await expect(issueService(db).update(issue!.id, { status: "done" })).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "pipeline_stage_incomplete",
+        caseId: created.case.id,
+        stageKey: "drafting",
+      },
+    });
+
+    await svc.claimCase({ companyId: company.id, caseId: created.case.id, actor: userActor });
+    await issueService(db).update(issue!.id, { status: "blocked" });
+    const [releasedCase] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
+    expect(releasedCase!.leaseToken).toBeNull();
+    await svc.claimCase({ companyId: company.id, caseId: created.case.id, actor: userActor });
+    await expect(issueService(db).update(issue!.id, { status: "cancelled" }))
+      .resolves.toMatchObject({ status: "cancelled" });
+    const [cancelReleasedCase] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
+    expect(cancelReleasedCase!.leaseToken).toBeNull();
 
     const triggerEvent = await db.insert(pipelineCaseEvents).values({
       companyId: company.id,
@@ -1483,6 +1589,56 @@ describeEmbeddedPostgres("pipelineService", () => {
       .from(pipelineCaseIssueLinks)
       .where(eq(pipelineCaseIssueLinks.issueId, crashExecutions[0]!.executionIssueId!));
     expect(crashLinks).toHaveLength(1);
+  });
+
+  it("recovers an automated working stage whose only current-stage task terminated", async () => {
+    const company = await seedCompany();
+    const routine = await seedRoutine(company.id, "Recovery automation");
+    const pipeline = await svc.createPipeline({
+      companyId: company.id,
+      key: "recovery",
+      name: "Recovery",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open" },
+        { key: "build", name: "Build", kind: "working", config: { onEnter: { type: "run_routine", routineId: routine.id } } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "stranded",
+      title: "Stranded automation",
+      actor: userActor,
+    });
+    const moved = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "build",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    });
+    expect(moved.automationExecution.status).toBe("succeeded");
+    const firstIssueId = moved.automationExecution.status === "succeeded"
+      ? moved.automationExecution.execution.executionIssueId
+      : null;
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, firstIssueId!));
+
+    const recovered = await svc.recoverStrandedAutomationCases();
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ caseId: created.case.id, status: "succeeded" });
+    expect(recovered[0]!.issueId).not.toBe(firstIssueId);
+    const ledgers = await db.select().from(pipelineAutomationExecutions)
+      .where(eq(pipelineAutomationExecutions.caseId, created.case.id));
+    expect(ledgers).toHaveLength(2);
+    const events = await svc.listCaseEvents(company.id, created.case.id);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "updated",
+      payload: expect.objectContaining({ action: "stage_automation_rerun_requested", reason: "no_action_path" }),
+    }));
   });
 
   it("carries saved stage automation workspace context into the execution issue", async () => {

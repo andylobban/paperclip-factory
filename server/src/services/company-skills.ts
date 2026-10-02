@@ -638,6 +638,7 @@ export const PAPERCLIP_CORE_SKILL_KEYS = [
   "paperclipai/paperclip/paperclip-board",
   "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
   "paperclipai/paperclip/paperclip-create-agent",
+  "paperclipai/paperclip/pipeline-case-operations",
   "paperclipai/paperclip/para-memory-files",
 ] as const;
 

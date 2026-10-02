@@ -294,6 +294,19 @@ describe("paperclip skill utils", () => {
     await expect(fs.access(path.resolve("scripts/paperclip-upload-artifact.sh"))).rejects.toThrow();
   });
 
+  it("ships the pipeline case operations contract referenced by stage automation", async () => {
+    const skillBody = await fs.readFile(
+      path.resolve("skills/pipeline-case-operations/SKILL.md"),
+      "utf8",
+    );
+
+    expect(skillBody).toContain("name: pipeline-case-operations");
+    expect(skillBody).toContain("POST /api/cases/:caseId/claim");
+    expect(skillBody).toContain("POST /api/cases/:caseId/transition");
+    expect(skillBody).toContain("required_outputs_missing");
+    expect(skillBody).toContain("transition the case first");
+  });
+
   it("keeps the external-chat shortcut behind the server-verified harness boundary", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
     const shortcut = skillBody.match(
