@@ -3840,6 +3840,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     caseId: string;
     actor: PipelineActor;
     reason?: "manual" | "no_action_path";
+    expectedLatestExecutionId?: string | null;
   }) {
     const ledger = await db.transaction(async (tx) => {
       const detail = await getCaseWithStageForUpdateOrThrow(tx, input.companyId, input.caseId);
@@ -3848,6 +3849,36 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         throw unprocessable("Current stage does not have entry automation configured", {
           code: "automation_not_configured",
         });
+      }
+      if (input.reason === "no_action_path") {
+        const latestCurrentStageExecution = await tx
+          .select({ id: pipelineAutomationExecutions.id })
+          .from(pipelineAutomationExecutions)
+          .innerJoin(
+            pipelineCaseEvents,
+            eq(pipelineAutomationExecutions.triggeringEventId, pipelineCaseEvents.id),
+          )
+          .where(and(
+            eq(pipelineAutomationExecutions.companyId, input.companyId),
+            eq(pipelineAutomationExecutions.caseId, input.caseId),
+            eq(pipelineCaseEvents.toStageId, detail.stage.id),
+          ))
+          .orderBy(
+            desc(pipelineAutomationExecutions.updatedAt),
+            desc(pipelineAutomationExecutions.createdAt),
+          )
+          .limit(1)
+          .then((items) => items[0] ?? null);
+        if (
+          (latestCurrentStageExecution?.id ?? null) !==
+          (input.expectedLatestExecutionId ?? null)
+        ) {
+          throw conflict("Pipeline recovery was superseded by another action", {
+            code: "recovery_superseded",
+            expectedLatestExecutionId: input.expectedLatestExecutionId ?? null,
+            latestExecutionId: latestCurrentStageExecution?.id ?? null,
+          });
+        }
       }
       const event = await writeCaseEvent(tx, {
         companyId: input.companyId,
@@ -3939,7 +3970,10 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             isNull(issues.hiddenAt),
           )),
         db
-          .select({ status: pipelineAutomationExecutions.status })
+          .select({
+            id: pipelineAutomationExecutions.id,
+            status: pipelineAutomationExecutions.status,
+          })
           .from(pipelineAutomationExecutions)
           .innerJoin(
             pipelineCaseEvents,
@@ -3956,12 +3990,25 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       ]);
       if (openBlocker || latestExecution?.status === "failed") continue;
       if (currentStageLinks.some((link) => !["done", "cancelled"].includes(link.status))) continue;
-      const result = await rerunCurrentStageAutomation({
-        companyId: row.case.companyId,
-        caseId: row.case.id,
-        actor: { type: "system" },
-        reason: "no_action_path",
-      });
+      let result: Awaited<ReturnType<typeof rerunCurrentStageAutomation>>;
+      try {
+        result = await rerunCurrentStageAutomation({
+          companyId: row.case.companyId,
+          caseId: row.case.id,
+          actor: { type: "system" },
+          reason: "no_action_path",
+          expectedLatestExecutionId: latestExecution?.id ?? null,
+        });
+      } catch (error) {
+        if (
+          error instanceof HttpError &&
+          error.status === 409 &&
+          (error.details as { code?: unknown } | undefined)?.code === "recovery_superseded"
+        ) {
+          continue;
+        }
+        throw error;
+      }
       recovered.push({
         caseId: row.case.id,
         executionId: result.automationExecution.status === "none"

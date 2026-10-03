@@ -1626,7 +1626,15 @@ describeEmbeddedPostgres("pipelineService", () => {
       : null;
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, firstIssueId!));
 
-    const recovered = await svc.recoverStrandedAutomationCases();
+    // Separate service instances model concurrent recovery loops from different
+    // application processes. Both read the stranded case before either may
+    // create its recovery event, ledger, or automation issue.
+    const concurrentSvc = pipelineService(db, { heartbeat: noopHeartbeat });
+    const recoverySweeps = await Promise.all([
+      svc.recoverStrandedAutomationCases(),
+      concurrentSvc.recoverStrandedAutomationCases(),
+    ]);
+    const recovered = recoverySweeps.flat();
 
     expect(recovered).toHaveLength(1);
     expect(recovered[0]).toMatchObject({ caseId: created.case.id, status: "succeeded" });
@@ -1635,10 +1643,18 @@ describeEmbeddedPostgres("pipelineService", () => {
       .where(eq(pipelineAutomationExecutions.caseId, created.case.id));
     expect(ledgers).toHaveLength(2);
     const events = await svc.listCaseEvents(company.id, created.case.id);
-    expect(events).toContainEqual(expect.objectContaining({
-      type: "updated",
-      payload: expect.objectContaining({ action: "stage_automation_rerun_requested", reason: "no_action_path" }),
-    }));
+    const recoveryEvents = events.filter((event) => (
+      event.type === "updated" &&
+      event.payload.action === "stage_automation_rerun_requested" &&
+      event.payload.reason === "no_action_path"
+    ));
+    expect(recoveryEvents).toHaveLength(1);
+    const recoveryLedger = ledgers.find((ledger) => ledger.triggeringEventId === recoveryEvents[0]!.id);
+    expect(recoveryLedger).toBeDefined();
+    expect(recoveryLedger!.executionIssueId).toBeTruthy();
+    const recoveryIssues = await db.select().from(issues)
+      .where(eq(issues.id, recoveryLedger!.executionIssueId!));
+    expect(recoveryIssues).toHaveLength(1);
   });
 
   it("carries saved stage automation workspace context into the execution issue", async () => {
