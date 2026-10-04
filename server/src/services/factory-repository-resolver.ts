@@ -167,8 +167,12 @@ export function factoryRepositoryResolver(
   const resolveGitHubRepository = deps.resolveGitHubRepository
     ?? ((input) => toolAccessService(db).resolveOrCreatePrivateProjectRepository(input));
 
-  async function existingWorkspace(companyId: string, projectId: string) {
-    return db
+  async function existingWorkspace(
+    database: Db,
+    companyId: string,
+    projectId: string,
+  ) {
+    return database
       .select()
       .from(projectWorkspaces)
       .where(and(
@@ -179,7 +183,7 @@ export function factoryRepositoryResolver(
       .then((rows) => rows.find((row) => Boolean(row.cwd || row.repoUrl)) ?? null);
   }
 
-  async function registerWorkspace(input: {
+  async function registerWorkspace(database: Db, input: {
     companyId: string;
     projectId: string;
     name: string;
@@ -187,58 +191,55 @@ export function factoryRepositoryResolver(
     repository?: (ProjectRepository & { factoryCreated?: boolean }) | null;
     source: RepositoryResolutionResult["source"];
   }): Promise<RepositoryResolutionResult> {
-    return db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`factory-repository:${input.projectId}`}, 0))`);
-      const current = await tx
-        .select()
-        .from(projectWorkspaces)
-        .where(and(
-          eq(projectWorkspaces.companyId, input.companyId),
-          eq(projectWorkspaces.projectId, input.projectId),
-        ))
-        .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
-        .then((rows) => rows.find((row) => Boolean(row.cwd || row.repoUrl)) ?? null);
-      if (current) {
-        return {
-          projectId: input.projectId,
-          projectWorkspaceId: current.id,
-          source: "existing",
-          repositoryUrl: current.repoUrl,
-        };
-      }
-      const [workspace] = await tx.insert(projectWorkspaces).values({
-        companyId: input.companyId,
-        projectId: input.projectId,
-        name: input.repository?.fullName ?? input.name,
-        sourceType: input.cwd ? "local_path" : "git_repo",
-        cwd: input.cwd ?? null,
-        repoUrl: input.repository?.url ?? (input.cwd ? await localGitHubRemote(input.cwd) : null),
-        remoteProvider: input.repository ? "github" : null,
-        metadata: input.repository
-          ? {
-              githubRepositoryId: input.repository.id,
-              repositoryVisibility: input.repository.private === true ? "private" : "public",
-              provisionedBy: "factory_repository_resolver",
-            }
-          : { discoveredBy: "factory_repository_resolver" },
-        isPrimary: true,
-      }).returning();
-      await tx.update(projects).set({
-        executionWorkspacePolicy: sql`jsonb_set(
-          coalesce(${projects.executionWorkspacePolicy}, '{}'::jsonb),
-          '{defaultProjectWorkspaceId}',
-          to_jsonb(${workspace!.id}::text),
-          true
-        )`,
-        updatedAt: new Date(),
-      }).where(and(eq(projects.companyId, input.companyId), eq(projects.id, input.projectId)));
+    const current = await database
+      .select()
+      .from(projectWorkspaces)
+      .where(and(
+        eq(projectWorkspaces.companyId, input.companyId),
+        eq(projectWorkspaces.projectId, input.projectId),
+      ))
+      .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
+      .then((rows) => rows.find((row) => Boolean(row.cwd || row.repoUrl)) ?? null);
+    if (current) {
       return {
         projectId: input.projectId,
-        projectWorkspaceId: workspace!.id,
-        source: input.source,
-        repositoryUrl: workspace!.repoUrl,
+        projectWorkspaceId: current.id,
+        source: "existing" as const,
+        repositoryUrl: current.repoUrl,
       };
-    });
+    }
+    const [workspace] = await database.insert(projectWorkspaces).values({
+      companyId: input.companyId,
+      projectId: input.projectId,
+      name: input.repository?.fullName ?? input.name,
+      sourceType: input.cwd ? "local_path" : "git_repo",
+      cwd: input.cwd ?? null,
+      repoUrl: input.repository?.url ?? (input.cwd ? await localGitHubRemote(input.cwd) : null),
+      remoteProvider: input.repository ? "github" : null,
+      metadata: input.repository
+        ? {
+            githubRepositoryId: input.repository.id,
+            repositoryVisibility: input.repository.private === true ? "private" : "public",
+            provisionedBy: "factory_repository_resolver",
+          }
+        : { discoveredBy: "factory_repository_resolver" },
+      isPrimary: true,
+    }).returning();
+    await database.update(projects).set({
+      executionWorkspacePolicy: sql`jsonb_set(
+        coalesce(${projects.executionWorkspacePolicy}, '{}'::jsonb),
+        '{defaultProjectWorkspaceId}',
+        to_jsonb(${workspace!.id}::text),
+        true
+      )`,
+      updatedAt: new Date(),
+    }).where(and(eq(projects.companyId, input.companyId), eq(projects.id, input.projectId)));
+    return {
+      projectId: input.projectId,
+      projectWorkspaceId: workspace!.id,
+      source: input.source,
+      repositoryUrl: workspace!.repoUrl,
+    };
   }
 
   return {
@@ -264,7 +265,7 @@ export function factoryRepositoryResolver(
       );
       if (!policy) return null;
 
-      const existing = await existingWorkspace(input.companyId, input.projectId);
+      const existing = await existingWorkspace(db, input.companyId, input.projectId);
       if (existing) {
         return {
           projectId: input.projectId,
@@ -275,48 +276,74 @@ export function factoryRepositoryResolver(
       }
 
       const repositoryName = policy.repositoryName ?? deriveProjectUrlKey(project.name, project.id);
-      const local = await localRepositoryCandidate(policy.localSearchRoots, repositoryName);
-      let result: RepositoryResolutionResult;
-      if (local) {
-        result = await registerWorkspace({
-          companyId: input.companyId,
-          projectId: input.projectId,
-          name: repositoryName,
-          cwd: local,
-          source: "local",
-        });
-      } else if (policy.githubOwner) {
-        const repository = await resolveGitHubRepository({
-          companyId: input.companyId,
-          userId: input.responsibleUserId,
-          localTrusted: input.localTrusted,
-          owner: policy.githubOwner,
-          name: repositoryName,
-          createIfMissing: policy.createIfMissing,
-        });
-        if (!repository) {
-          throw conflict("No local or authorized GitHub repository matches this project", {
-            code: "repository_resolution_failed",
+      // The project-scoped database lock intentionally spans the bounded remote
+      // lookup/create. It is the cross-process idempotency boundary: after the
+      // winner registers a workspace, every waiter rechecks under the lock and
+      // returns that workspace without issuing a second GitHub create.
+      const result = await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`factory-repository:${input.projectId}`}, 0))`);
+        const lockedDb = tx as unknown as Db;
+        // Lock the durable project row as well as the advisory key. The row
+        // lock is the cross-process ownership record for the remote creation
+        // interval; a waiter cannot issue its own provider create until it has
+        // re-read the workspace state after the winner commits.
+        await tx
+          .select({ id: projects.id })
+          .from(projects)
+          .where(and(eq(projects.companyId, input.companyId), eq(projects.id, input.projectId)))
+          .for("update");
+        const current = await existingWorkspace(lockedDb, input.companyId, input.projectId);
+        if (current) {
+          return {
             projectId: input.projectId,
-            repository: `${policy.githubOwner}/${repositoryName}`,
+            projectWorkspaceId: current.id,
+            source: "existing" as const,
+            repositoryUrl: current.repoUrl,
+          };
+        }
+
+        const local = await localRepositoryCandidate(policy.localSearchRoots, repositoryName);
+        if (local) {
+          return registerWorkspace(lockedDb, {
+            companyId: input.companyId,
+            projectId: input.projectId,
+            name: repositoryName,
+            cwd: local,
+            source: "local",
           });
         }
-        result = await registerWorkspace({
-          companyId: input.companyId,
-          projectId: input.projectId,
-          name: repositoryName,
-          repository,
-          source: repository.factoryCreated === true ? "github_created" : "github",
-        });
-      } else {
+        if (policy.githubOwner) {
+          const repository = await resolveGitHubRepository({
+            companyId: input.companyId,
+            userId: input.responsibleUserId,
+            localTrusted: input.localTrusted,
+            owner: policy.githubOwner,
+            name: repositoryName,
+            createIfMissing: policy.createIfMissing,
+          });
+          if (!repository) {
+            throw conflict("No local or authorized GitHub repository matches this project", {
+              code: "repository_resolution_failed",
+              projectId: input.projectId,
+              repository: `${policy.githubOwner}/${repositoryName}`,
+            });
+          }
+          return registerWorkspace(lockedDb, {
+            companyId: input.companyId,
+            projectId: input.projectId,
+            name: repositoryName,
+            repository,
+            source: repository.factoryCreated === true ? "github_created" : "github",
+          });
+        }
         throw conflict("No local repository was found and no GitHub owner is configured", {
           code: "repository_resolution_failed",
           projectId: input.projectId,
           repository: repositoryName,
         });
-      }
+      });
 
-      await logActivity(db, {
+      if (result.source !== "existing") await logActivity(db, {
         companyId: input.companyId,
         actorType: "system",
         actorId: "factory-repository-resolver",

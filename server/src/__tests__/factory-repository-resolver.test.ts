@@ -163,6 +163,58 @@ describeEmbeddedPostgres("factoryRepositoryResolver", () => {
     });
   });
 
+  it("serializes repository creation across independent resolver services", async () => {
+    const { company, project } = await seedProject({
+      version: 1,
+      enabled: true,
+      localSearchRoots: [],
+      repositoryName: "agent-first-ui",
+      createIfMissing: true,
+      githubOwner: "example",
+      visibility: "private",
+    });
+    let releaseCreate!: () => void;
+    const createStarted = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let firstCreateStarted!: () => void;
+    const firstCreate = new Promise<void>((resolve) => { firstCreateStarted = resolve; });
+    const github = vi.fn(async () => {
+      firstCreateStarted();
+      await createStarted;
+      return {
+        id: "44",
+        fullName: "example/agent-first-ui",
+        url: "https://github.com/example/agent-first-ui",
+        private: true,
+        connections: ["GitHub"],
+        factoryCreated: true,
+      };
+    });
+    const first = factoryRepositoryResolver(createDb(tempDb!.connectionString), { resolveGitHubRepository: github });
+    const second = factoryRepositoryResolver(createDb(tempDb!.connectionString), { resolveGitHubRepository: github });
+
+    const firstResult = first.resolveForProject({
+      companyId: company.id,
+      projectId: project.id,
+      responsibleUserId: "owner-user",
+    });
+    await firstCreate;
+    const secondResult = second.resolveForProject({
+      companyId: company.id,
+      projectId: project.id,
+      responsibleUserId: "owner-user",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(github).toHaveBeenCalledOnce();
+    releaseCreate();
+
+    const [one, two] = await Promise.all([firstResult, secondResult]);
+    expect(github).toHaveBeenCalledOnce();
+    expect(one).toMatchObject({ repositoryUrl: "https://github.com/example/agent-first-ui" });
+    expect(two).toMatchObject({ repositoryUrl: "https://github.com/example/agent-first-ui" });
+    expect(one!.projectWorkspaceId).toBe(two!.projectWorkspaceId);
+    expect(await db.select().from(projectWorkspaces)).toHaveLength(1);
+  });
+
   it("rejects a symlinked local candidate that escapes its configured root", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "paperclip-contained-repos-"));
     const outside = await mkdtemp(path.join(tmpdir(), "paperclip-outside-repo-"));
