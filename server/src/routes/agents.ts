@@ -24,7 +24,7 @@ import {
   agentSkillSyncSchema,
   agentMineInboxQuerySchema,
   ADAPTER_AGNOSTIC_KEYS,
-  AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  defaultMaxConcurrentRunsForAdapter,
   createAgentKeySchema,
   createAgentHireSchema,
   createAgentSchema,
@@ -2416,7 +2416,10 @@ export function agentRoutes(
     };
   }
 
-  function normalizeNewAgentRuntimeConfig(runtimeConfig: unknown): Record<string, unknown> {
+  function normalizeNewAgentRuntimeConfig(
+    runtimeConfig: unknown,
+    adapterType: string,
+  ): Record<string, unknown> {
     const parsedRuntimeConfig = asRecord(runtimeConfig);
     const normalizedRuntimeConfig = parsedRuntimeConfig ? { ...parsedRuntimeConfig } : {};
     const parsedHeartbeat = asRecord(normalizedRuntimeConfig.heartbeat);
@@ -2426,7 +2429,7 @@ export function agentRoutes(
       heartbeat.enabled = false;
     }
     if (parseNumberLike(heartbeat.maxConcurrentRuns) == null) {
-      heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+      heartbeat.maxConcurrentRuns = defaultMaxConcurrentRunsForAdapter(adapterType);
     }
 
     normalizedRuntimeConfig.heartbeat = heartbeat;
@@ -2441,7 +2444,7 @@ export function agentRoutes(
     adapterConfig: Record<string, unknown>,
     runtimeConfig: unknown,
   ) {
-    const normalized = normalizeNewAgentRuntimeConfig(runtimeConfig);
+    const normalized = normalizeNewAgentRuntimeConfig(runtimeConfig, adapterType);
     if (req.actor.type !== "agent" || normalized.aiConnection) return normalized;
     const manager = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
     if (!manager || manager.companyId !== companyId) throw forbidden("Hiring agent is unavailable");

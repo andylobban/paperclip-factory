@@ -33,7 +33,10 @@ Request behavior fields:
 - payloadTemplate (object, optional): additional fields merged into gateway agent params
 - workspaceRuntime (object, optional): reserved workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
 - timeoutSec (number, optional): adapter timeout in seconds (default 120)
-- waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
+- waitTimeoutMs (number, optional): compatibility default for queueTimeoutMs and idleTimeoutMs (default timeoutSec * 1000)
+- queueTimeoutMs (number, optional): maximum time to wait for the first gateway activity (default waitTimeoutMs)
+- idleTimeoutMs (number, optional): maximum time after the latest gateway activity before stopping the remote run (default waitTimeoutMs)
+- waitPollIntervalMs (number, optional): bounded agent.wait polling interval used to observe activity and cancellation (default 5000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
 - claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
@@ -50,4 +53,10 @@ Standard result metadata supported:
 - meta.runtimeServices (array, optional): normalized adapter-managed runtime service reports
 - meta.previewUrl (string, optional): shorthand single preview URL
 - meta.previewUrls (string[], optional): shorthand multiple preview URLs
+
+Cancellation contract:
+- Operator cancellation and queue/idle timeout call sessions.abort with clearQueued=true.
+- Paperclip reports cancellation as acknowledged only after the gateway returns aborted or no-active-run.
+- A failed or ambiguous abort is returned as openclaw_gateway_cancel_unverified so the controller cannot mistake a live remote run for a terminal one.
+- New OpenClaw agents default heartbeat.maxConcurrentRuns to 1 because gateway execution lanes are serial; operators may explicitly raise it for a gateway topology that supports parallel runs.
 `;

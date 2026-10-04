@@ -58,9 +58,23 @@ The agent request is built as:
 ## Timeouts
 
 - `timeoutSec` controls adapter-level request budget
-- `waitTimeoutMs` controls `agent.wait.timeoutMs`
+- `waitTimeoutMs` is the compatibility default for queue and idle deadlines
+- `queueTimeoutMs` bounds the wait for the first gateway activity
+- `idleTimeoutMs` bounds inactivity after execution begins
+- `waitPollIntervalMs` controls bounded `agent.wait` polling (default 5 seconds)
 
-If `agent.wait` returns `timeout`, adapter returns `openclaw_gateway_wait_timeout`.
+An individual `agent.wait` timeout is a poll result, not proof that the remote
+run ended. Paperclip continues polling while gateway activity remains within
+the configured deadlines. When a queue or idle deadline expires, the adapter
+calls `sessions.abort` with `clearQueued=true` and returns
+`openclaw_gateway_wait_timeout` only with the provider acknowledgement attached.
+If termination cannot be verified, it returns
+`openclaw_gateway_cancel_unverified` instead of claiming a terminal run.
+
+New OpenClaw agents default `heartbeat.maxConcurrentRuns` to `1`. This keeps a
+serial gateway lane from accepting several Paperclip runs whose wait budgets
+start before provider execution. Deployments with independently parallel
+OpenClaw lanes can explicitly raise that value.
 
 ## Log Format
 

@@ -88,6 +88,7 @@ import {
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  defaultMaxConcurrentRunsForAdapter,
   CHAT_PROVIDERS,
   CONNECTION_INTENT_AGENT_GUIDANCE,
   CONNECTION_RUNTIME_TOOL_NAMES,
@@ -3625,11 +3626,14 @@ export function compactRunLogChunk(
   return `${normalized.slice(0, headChars)}${marker}${normalized.slice(normalized.length - tailChars)}`;
 }
 
-function normalizeMaxConcurrentRuns(value: unknown) {
+function normalizeMaxConcurrentRuns(
+  value: unknown,
+  fallback = HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT,
+) {
   const parsed = Math.floor(
-    asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT),
+    asNumber(value, fallback),
   );
-  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
+  if (!Number.isFinite(parsed)) return fallback;
   return Math.max(
     HEARTBEAT_MAX_CONCURRENT_RUNS_MIN,
     Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed),
@@ -16578,6 +16582,7 @@ export function heartbeatService(
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
+        defaultMaxConcurrentRunsForAdapter(agent.adapterType),
       ),
       skipTimerWhenNoActionableWork: asBoolean(
         heartbeat.skipTimerWhenNoActionableWork ??
