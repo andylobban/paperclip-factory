@@ -617,6 +617,7 @@ function sameOAuthIssuer(
 }
 
 const oauthRegistrationFlights = new Map<string, Promise<unknown>>();
+const githubRepositoryProvisionFlights = new Map<string, Promise<unknown>>();
 
 async function singleFlight<T>(
   flights: Map<string, Promise<unknown>>,
@@ -647,6 +648,8 @@ type ToolAccessServiceOptions = {
   remoteHttpEndpointLookup?: RemoteHttpEndpointLookup;
   /** Test seam for protocol fixtures. Production uses the DNS-pinned transport. */
   remoteHttpRequest?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seam for fixed-origin GitHub API calls. */
+  githubRequest?: typeof fetch;
   /** Test seam for the centrally registered Gmail OAuth broker. */
   paperclipCloudConnector?: PaperclipCloudConnector | null;
   /** @deprecated Use paperclipCloudConnector. */
@@ -17136,6 +17139,158 @@ export function toolAccessService(
       return toApplication(row);
     },
 
+    /**
+     * Resolve an exact GitHub repository or create it as private. This uses the
+     * same credential audience rules as repository discovery, so background
+     * factory work cannot borrow an unrelated user's private GitHub grant.
+     */
+    resolveOrCreatePrivateProjectRepository: async (input: {
+      companyId: string;
+      userId: string | null;
+      localTrusted?: boolean;
+      owner: string;
+      name: string;
+      createIfMissing: boolean;
+    }): Promise<(import("@paperclipai/shared").ProjectRepository & { factoryCreated?: boolean }) | null> => {
+      const fullName = `${input.owner}/${input.name}`;
+      const exact = (await toolAccessService(db, options).listProjectRepositories(
+        input.companyId,
+        input.userId,
+        input.localTrusted === true,
+      )).repositories.find((repo) => repo.fullName.toLowerCase() === fullName.toLowerCase());
+      if (exact) return exact;
+      if (!input.createIfMissing) return null;
+
+      return singleFlight(
+        githubRepositoryProvisionFlights,
+        `${input.companyId}:${fullName.toLowerCase()}`,
+        async () => {
+          const [connections, grants, members, memberships] = await Promise.all([
+            db.select().from(toolConnections).where(and(
+              eq(toolConnections.companyId, input.companyId),
+              eq(toolConnections.enabled, true),
+            )),
+            db.select().from(connectionGrants).where(eq(connectionGrants.companyId, input.companyId)),
+            db.select().from(connectionGrantMembers).where(eq(connectionGrantMembers.companyId, input.companyId)),
+            input.userId
+              ? db.select().from(companyMemberships).where(and(
+                  eq(companyMemberships.companyId, input.companyId),
+                  eq(companyMemberships.principalType, "user"),
+                  eq(companyMemberships.principalId, input.userId),
+                  eq(companyMemberships.status, "active"),
+                ))
+              : Promise.resolve([]),
+          ]);
+          const actor: ActorInfo = input.userId
+            ? { actorType: "user", actorId: input.userId }
+            : { actorType: "system", actorId: "factory-repository-resolver" };
+          const request = options.githubRequest ?? fetch;
+
+          for (const connection of connections) {
+            if (
+              connection.status !== "active" ||
+              asRecord(connection.config).sourceTemplateKey !== "github"
+            ) continue;
+            const connectionGrants = grants.filter((grant) => grant.connectionId === connection.id);
+            const availableGrants = connectionGrants.filter((grant) =>
+              !(
+                grant.kind === "organization" &&
+                ["per_user", "per_agent"].includes(connection.credentialPolicy)
+              ) &&
+              canBrowseProjectRepositoryGrant({
+                grant,
+                userId: input.userId,
+                activeMember: input.localTrusted === true || memberships.length > 0,
+                audience: members
+                  .filter((member) => member.grantId === grant.id)
+                  .map((member) => member.subjectId),
+              }),
+            );
+            const legacyShared =
+              connectionGrants.length === 0 &&
+              connection.credentialPolicy === "shared" &&
+              (input.localTrusted === true || (!!input.userId && memberships.length > 0));
+
+            for (const initialGrant of legacyShared ? [null] : availableGrants) {
+              try {
+                let token: string;
+                if (
+                  initialGrant &&
+                  asRecord(asRecord(connection.config).oauth).connectorProfile === "github.code"
+                ) {
+                  const grant = await refreshManagedGitHubGrantAccess(connection, initialGrant, actor);
+                  const ref = grant.credentialSecretRefs.find((candidate) => candidate.configPath === "oauth.access_token");
+                  if (!ref) continue;
+                  token = (await resolveOAuthGrantSecret(connection, grant, ref, actor, undefined)).value;
+                } else {
+                  const headers = initialGrant
+                    ? await (async () => {
+                        const ref = initialGrant.credentialSecretRefs.find((candidate) =>
+                          candidate.configPath === "oauth.access_token" ||
+                          /authorization|token|api_key/i.test(candidate.configPath),
+                        );
+                        if (!ref) throw unprocessable("Reconnect GitHub to create repositories");
+                        const secret = await resolveOAuthGrantSecret(connection, initialGrant, ref, actor, undefined);
+                        return { Authorization: `Bearer ${secret.value}` };
+                      })()
+                    : await resolveCredentialHeaders(connection, actor);
+                  const authorization = (headers as Record<string, string>).Authorization
+                    ?? (headers as Record<string, string>).authorization;
+                  const match = typeof authorization === "string"
+                    ? authorization.match(/^(?:Bearer|token)\s+(.+)$/i)
+                    : null;
+                  if (!match?.[1]) continue;
+                  token = match[1];
+                }
+
+                const identity = await githubBotRequest<{ login?: string }>(request, token, "/user");
+                const path = identity.login?.toLowerCase() === input.owner.toLowerCase()
+                  ? "/user/repos"
+                  : `/orgs/${encodeURIComponent(input.owner)}/repos`;
+                const created = await githubBotRequest<{
+                  id?: number;
+                  full_name?: string;
+                  private?: boolean;
+                }>(request, token, path, {
+                  method: "POST",
+                  body: { name: input.name, private: true, auto_init: true },
+                });
+                const id = githubId(created.id);
+                if (
+                  !id ||
+                  created.full_name?.toLowerCase() !== fullName.toLowerCase() ||
+                  created.private !== true
+                ) {
+                  throw unprocessable("GitHub did not confirm a private repository");
+                }
+                return {
+                  id,
+                  fullName: created.full_name,
+                  url: `https://github.com/${created.full_name}`,
+                  private: true,
+                  connections: [connection.name],
+                  factoryCreated: true,
+                };
+              } catch {
+                // Try another authorized GitHub grant without leaking provider
+                // or credential details into the factory-facing error.
+              }
+            }
+          }
+          const recovered = (await toolAccessService(db, options).listProjectRepositories(
+            input.companyId,
+            input.userId,
+            input.localTrusted === true,
+          )).repositories.find((repo) => repo.fullName.toLowerCase() === fullName.toLowerCase());
+          if (recovered) return recovered;
+          throw unprocessable(
+            "No authorized GitHub connection could create the private repository. Reconnect GitHub with repository creation access and retry.",
+            { code: "github_repository_creation_unavailable", fullName },
+          );
+        },
+      );
+    },
+
     // Repository discovery uses credential audiences, not connection-management
     // visibility. An administrator cannot browse another user's private repos.
     listProjectRepositories: async (
@@ -17258,7 +17413,7 @@ export function toolAccessService(
                     return { Authorization: `Bearer ${secret.value}` };
                   })()
                 : await resolveCredentialHeaders(connection, actor);
-              rows = await loadGitHubTokenRepositories(headers);
+              rows = await loadGitHubTokenRepositories(headers, options.githubRequest ?? fetch);
             }
             for (const row of rows) {
               mergeProjectRepository(repositories, row, connection.name);

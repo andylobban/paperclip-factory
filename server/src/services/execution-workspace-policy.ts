@@ -1,10 +1,11 @@
-import type {
-  ExecutionWorkspaceMode,
-  ExecutionWorkspaceStrategy,
-  IssueExecutionWorkspaceSettings,
-  ProjectExecutionWorkspaceDefaultMode,
-  ProjectExecutionWorkspacePolicy,
-  SharedWorkspaceConcurrency,
+import {
+  projectRepositoryResolutionPolicySchema,
+  type ExecutionWorkspaceMode,
+  type ExecutionWorkspaceStrategy,
+  type IssueExecutionWorkspaceSettings,
+  type ProjectExecutionWorkspaceDefaultMode,
+  type ProjectExecutionWorkspacePolicy,
+  type SharedWorkspaceConcurrency,
 } from "@paperclipai/shared";
 import { asString, parseObject } from "../adapters/utils.js";
 
@@ -115,6 +116,9 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
   const allowIssueOverride =
     typeof parsed.allowIssueOverride === "boolean" ? parsed.allowIssueOverride : undefined;
   const sharedWorkspaceConcurrency = parseSharedWorkspaceConcurrency(parsed.sharedWorkspaceConcurrency);
+  const repositoryResolution = projectRepositoryResolutionPolicySchema.safeParse(
+    parsed.repositoryResolution,
+  );
   const normalizedDefaultMode = (() => {
     if (
       defaultMode === "shared_workspace" ||
@@ -152,6 +156,9 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
       : {}),
     ...(parsed.authorizationPolicy && typeof parsed.authorizationPolicy === "object" && !Array.isArray(parsed.authorizationPolicy)
       ? { authorizationPolicy: { ...(parsed.authorizationPolicy as Record<string, unknown>) } }
+      : {}),
+    ...(repositoryResolution.success
+      ? { repositoryResolution: repositoryResolution.data }
       : {}),
   };
 }

@@ -21,6 +21,8 @@ import {
   pipelineStages,
   pipelineTransitions,
   pipelines,
+  projects,
+  projectWorkspaces,
   routineRevisions,
   routines,
 } from "@paperclipai/db";
@@ -50,6 +52,7 @@ import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService } from "./authorization.js";
+import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import type { IssuePostCommitAction } from "./issues.js";
 import {
@@ -57,6 +60,11 @@ import {
   pipelineCaseOutputsService,
   summarizePipelineCaseOutputsForContext,
 } from "./pipeline-case-outputs.js";
+import {
+  factoryRepositoryResolutionPolicyFromEnvironment,
+  factoryRepositoryResolver,
+  type FactoryRepositoryResolver,
+} from "./factory-repository-resolver.js";
 
 const DEFAULT_LEASE_MS = 15 * 60 * 1000;
 const MAX_LEASE_MS = 24 * 60 * 60 * 1000;
@@ -1661,6 +1669,74 @@ async function assertNoOpenBlockers(db: PipelineDb, row: typeof pipelineCases.$i
   }
 }
 
+async function assertStageRepositoryReady(
+  db: PipelineDb,
+  input: {
+    companyId: string;
+    caseId: string;
+    stage: typeof pipelineStages.$inferSelect;
+    defaultRepositoryResolutionEnabled: boolean;
+  },
+) {
+  const automation = stageAutomation(input.stage);
+  if (!automation || automation.projectWorkspaceId) return;
+  const origin = await db
+    .select({
+      projectId: issues.projectId,
+      projectWorkspaceId: issues.projectWorkspaceId,
+    })
+    .from(pipelineCaseIssueLinks)
+    .innerJoin(issues, eq(pipelineCaseIssueLinks.issueId, issues.id))
+    .where(and(
+      eq(pipelineCaseIssueLinks.companyId, input.companyId),
+      eq(pipelineCaseIssueLinks.caseId, input.caseId),
+      eq(pipelineCaseIssueLinks.role, "origin"),
+      isNull(pipelineCaseIssueLinks.retiredAt),
+      eq(issues.companyId, input.companyId),
+    ))
+    .orderBy(desc(pipelineCaseIssueLinks.createdAt), desc(pipelineCaseIssueLinks.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  const projectId = automation.projectId ?? origin?.projectId ?? null;
+  if (!projectId) return;
+  if (origin?.projectId === projectId && origin.projectWorkspaceId) return;
+  const project = await db
+    .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
+    .from(projects)
+    .where(and(eq(projects.companyId, input.companyId), eq(projects.id, projectId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  const rawProjectPolicy = project?.executionWorkspacePolicy;
+  const hasProjectOverride = Boolean(
+    rawProjectPolicy &&
+    typeof rawProjectPolicy === "object" &&
+    !Array.isArray(rawProjectPolicy) &&
+    Object.prototype.hasOwnProperty.call(rawProjectPolicy, "repositoryResolution"),
+  );
+  const resolutionPolicy = parseProjectExecutionWorkspacePolicy(rawProjectPolicy)?.repositoryResolution;
+  const resolutionEnabled = hasProjectOverride
+    ? resolutionPolicy?.enabled === true
+    : input.defaultRepositoryResolutionEnabled;
+  if (!resolutionEnabled) return;
+  const workspace = await db
+    .select({ id: projectWorkspaces.id })
+    .from(projectWorkspaces)
+    .where(and(
+      eq(projectWorkspaces.companyId, input.companyId),
+      eq(projectWorkspaces.projectId, projectId),
+      or(isNotNull(projectWorkspaces.cwd), isNotNull(projectWorkspaces.repoUrl)),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (workspace) return;
+  throw conflict("Repository resolution must succeed before entering this stage", {
+    code: "repository_preflight_required",
+    caseId: input.caseId,
+    stageId: input.stage.id,
+    projectId,
+  });
+}
+
 type RequiredStageOutput = {
   kind: "document" | "work_product" | "attachment";
   key?: string;
@@ -2564,11 +2640,93 @@ async function ensureOriginIssueLink(
   return link;
 }
 
-export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}) {
+export function pipelineService(db: Db, deps: {
+  heartbeat?: IssueAssignmentWakeupDeps;
+  repositoryResolver?: Pick<FactoryRepositoryResolver, "resolveForProject">;
+} = {}) {
   const routinesSvc = routineService(db, { heartbeat: deps.heartbeat });
   const outputsSvc = pipelineCaseOutputsService(db);
   const authorization = authorizationService(db);
   const secretsSvc = secretService(db);
+  const defaultRepositoryResolutionPolicy = factoryRepositoryResolutionPolicyFromEnvironment();
+  const repositoryResolver = deps.repositoryResolver ?? factoryRepositoryResolver(db, {
+    defaultPolicy: defaultRepositoryResolutionPolicy,
+  });
+
+  async function resolveCaseAutomationExecutionContext(input: {
+    companyId: string;
+    caseId: string;
+    configured: PipelineAutomationExecutionContext;
+  }): Promise<PipelineAutomationExecutionContext> {
+    const origin = await db
+      .select({
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
+        responsibleUserId: issues.responsibleUserId,
+      })
+      .from(pipelineCaseIssueLinks)
+      .innerJoin(issues, eq(pipelineCaseIssueLinks.issueId, issues.id))
+      .where(and(
+        eq(pipelineCaseIssueLinks.companyId, input.companyId),
+        eq(pipelineCaseIssueLinks.caseId, input.caseId),
+        eq(pipelineCaseIssueLinks.role, "origin"),
+        isNull(pipelineCaseIssueLinks.retiredAt),
+        eq(issues.companyId, input.companyId),
+      ))
+      .orderBy(desc(pipelineCaseIssueLinks.createdAt), desc(pipelineCaseIssueLinks.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    const projectId = input.configured.projectId ?? origin?.projectId ?? null;
+    const inheritsOriginProject = Boolean(projectId && projectId === origin?.projectId);
+    let projectWorkspaceId = input.configured.projectWorkspaceId
+      ?? (inheritsOriginProject ? origin?.projectWorkspaceId ?? null : null);
+    if (projectId && !projectWorkspaceId) {
+      const resolved = await repositoryResolver.resolveForProject({
+        companyId: input.companyId,
+        projectId,
+        responsibleUserId: origin?.responsibleUserId ?? null,
+      });
+      projectWorkspaceId = resolved?.projectWorkspaceId ?? null;
+    }
+
+    return {
+      projectId,
+      projectWorkspaceId,
+      executionWorkspaceId: input.configured.executionWorkspaceId
+        ?? (inheritsOriginProject ? origin?.executionWorkspaceId ?? null : null),
+      executionWorkspacePreference: input.configured.executionWorkspacePreference
+        ?? (inheritsOriginProject
+          ? readExecutionWorkspacePreference(origin?.executionWorkspacePreference)
+          : null),
+      executionWorkspaceSettings: input.configured.executionWorkspaceSettings
+        ?? (inheritsOriginProject
+          ? readExecutionWorkspaceSettings(origin?.executionWorkspaceSettings)
+          : null),
+    };
+  }
+
+  async function preflightStageRepository(input: {
+    companyId: string;
+    caseId: string;
+    toStageId?: string;
+    toStageKey?: string;
+  }) {
+    const detail = await getCaseWithStageOrThrow(db, input.companyId, input.caseId);
+    const target = input.toStageId
+      ? await getStageOrThrow(db, detail.case.pipelineId, input.toStageId)
+      : await getStageByKeyOrThrow(db, detail.case.pipelineId, input.toStageKey ?? "");
+    const automation = stageAutomation(target);
+    if (!automation) return;
+    await resolveCaseAutomationExecutionContext({
+      companyId: input.companyId,
+      caseId: input.caseId,
+      configured: automation,
+    });
+  }
 
   async function assertRoutineInCompany(companyId: string, routineId: string) {
     const routine = await db
@@ -3315,16 +3473,21 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             config: breakdownConfig,
           })
         : null;
+      const executionContext = await resolveCaseAutomationExecutionContext({
+        companyId: execution.companyId,
+        caseId: execution.caseId,
+        configured: automation,
+      });
       const run = await routinesSvc.runPipelineStageEntryRoutine(execution.routineId, {
         source: "api",
         assigneeAgentId: routine.assigneeAgentId,
         idempotencyKey: `pipeline:${execution.caseId}:${execution.automationId}:${execution.triggeringEventId}`,
         issueOriginId: `pipeline-stage:${execution.caseId}:${execution.automationId}`,
-        projectId: automation.projectId,
-        projectWorkspaceId: automation.projectWorkspaceId,
-        executionWorkspaceId: automation.executionWorkspaceId,
-        executionWorkspacePreference: automation.executionWorkspacePreference,
-        executionWorkspaceSettings: automation.executionWorkspaceSettings,
+        projectId: executionContext.projectId,
+        projectWorkspaceId: executionContext.projectWorkspaceId,
+        executionWorkspaceId: executionContext.executionWorkspaceId,
+        executionWorkspacePreference: executionContext.executionWorkspacePreference,
+        executionWorkspaceSettings: executionContext.executionWorkspaceSettings,
         payload: {
           pipeline: contextPack.pipeline,
           case: contextPack.case,
@@ -3618,6 +3781,12 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       });
     }
     await assertNoOpenBlockers(tx, current, toStage);
+    await assertStageRepositoryReady(tx, {
+      companyId: input.companyId,
+      caseId: current.id,
+      stage: toStage,
+      defaultRepositoryResolutionEnabled: defaultRepositoryResolutionPolicy?.enabled === true,
+    });
 
     const enteringTerminal = terminalKindForStage(toStage.kind);
     const leavingStage = fromStage.id !== toStage.id;
@@ -5033,6 +5202,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       force?: boolean;
       skipChildrenTerminalGate?: boolean;
     }) {
+      await preflightStageRepository(input);
       const automationLedgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
       const result = await db.transaction((tx) => transitionCaseInTransaction(tx, { ...input, automationLedgers }));
       const automationExecutions = await executeAutomationLedgers(automationLedgers, { type: "system" });

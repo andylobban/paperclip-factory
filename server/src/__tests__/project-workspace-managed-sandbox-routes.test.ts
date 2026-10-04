@@ -108,7 +108,13 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp() {
+async function createApp(actor: Record<string, unknown> = {
+  type: "board",
+  userId: "board-user",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+}) {
   const [{ projectRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/projects.js")>("../routes/projects.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -117,13 +123,7 @@ async function createApp() {
   app.use(express.json());
   app.use((req, _res, next) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (req as any).actor = {
-      type: "board",
-      userId: "board-user",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -211,6 +211,7 @@ describe("project workspace host-path floor", () => {
     mockProjectService.resolveByReference.mockResolvedValue({ ambiguous: false, project: null });
     mockProjectService.getById.mockResolvedValue(buildProject());
     mockProjectService.create.mockResolvedValue(buildProject());
+    mockProjectService.update.mockResolvedValue(buildProject());
     mockProjectService.createWorkspace.mockResolvedValue(buildWorkspace());
     mockProjectService.updateWorkspace.mockResolvedValue(buildWorkspace());
     mockProjectService.listWorkspaces.mockResolvedValue([buildWorkspace()]);
@@ -283,6 +284,47 @@ describe("project workspace host-path floor", () => {
       "workspace-1",
       expect.objectContaining({ cwd: "/srv/projects/paperclip" }),
     );
+  });
+
+  it("refuses an agent attempt to add repository resolution", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+    const res = await request(app)
+      .patch("/api/projects/project-1")
+      .send({
+        executionWorkspacePolicy: {
+          enabled: true,
+          repositoryResolution: { enabled: true, localSearchRoots: [] },
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockProjectService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent attempt to clear existing repository resolution", async () => {
+    mockProjectService.getById.mockResolvedValue(buildProject({
+      executionWorkspacePolicy: {
+        enabled: true,
+        repositoryResolution: { enabled: true, localSearchRoots: [] },
+      },
+    }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+    const res = await request(app)
+      .patch("/api/projects/project-1")
+      .send({ executionWorkspacePolicy: { enabled: true } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockProjectService.update).not.toHaveBeenCalled();
   });
 
   it("refuses a nested workspace cwd on project create when the policy is on", async () => {

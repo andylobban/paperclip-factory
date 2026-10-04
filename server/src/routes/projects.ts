@@ -100,6 +100,46 @@ export function projectRoutes(db: Db) {
     );
   }
 
+  function repositoryResolutionPolicy(policy: unknown): Record<string, unknown> | null {
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) return null;
+    const candidate = (policy as Record<string, unknown>).repositoryResolution;
+    return candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? candidate as Record<string, unknown>
+      : null;
+  }
+
+  async function assertRepositoryResolutionPolicyMutation(
+    req: Request,
+    policy: unknown,
+    existingPolicy?: unknown,
+  ) {
+    const repositoryResolution = repositoryResolutionPolicy(policy);
+    const touchesRepositoryResolution = Boolean(
+      policy &&
+      typeof policy === "object" &&
+      !Array.isArray(policy) &&
+      Object.prototype.hasOwnProperty.call(policy, "repositoryResolution"),
+    );
+    const existingRepositoryResolution = repositoryResolutionPolicy(existingPolicy);
+    if (
+      req.actor.type === "agent" &&
+      (touchesRepositoryResolution || existingRepositoryResolution)
+    ) {
+      throw forbidden("Agent keys cannot configure automatic repository discovery or creation.");
+    }
+    if (!repositoryResolution) return;
+    const localSearchRoots = repositoryResolution.localSearchRoots;
+    if (
+      Array.isArray(localSearchRoots) &&
+      localSearchRoots.length > 0 &&
+      (await instanceSettings.getExperimental()).enableManagedSandboxOnly === true
+    ) {
+      throw unprocessable(
+        "This instance runs agents only in the platform-managed environment; local repository search roots are not configurable.",
+      );
+    }
+  }
+
   async function assertProjectEnvironmentSelection(companyId: string, environmentId: string | null | undefined) {
     if (environmentId === undefined || environmentId === null) return;
     await assertEnvironmentSelectionForCompany(environmentsSvc, companyId, environmentId, {
@@ -253,6 +293,7 @@ export function projectRoutes(db: Db) {
       ],
     );
     await assertNoManagedSandboxWorkspacePath(workspace);
+    await assertRepositoryResolutionPolicyMutation(req, projectData.executionWorkspacePolicy);
     if (projectData.env !== undefined) {
       projectData.env = await secretsSvc.normalizeEnvBindingsForPersistence(
         companyId,
@@ -333,6 +374,11 @@ export function projectRoutes(db: Db) {
     await assertProjectEnvironmentSelection(
       existing.companyId,
       readProjectPolicyEnvironmentId(body.executionWorkspacePolicy),
+    );
+    await assertRepositoryResolutionPolicyMutation(
+      req,
+      body.executionWorkspacePolicy,
+      existing.executionWorkspacePolicy,
     );
     if (typeof body.archivedAt === "string") {
       body.archivedAt = new Date(body.archivedAt);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -1756,6 +1756,134 @@ describeEmbeddedPostgres("pipelineService", () => {
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
+  });
+
+  it("inherits project workspace context from the linked origin issue", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    const routineSeed = await seedRoutine(company.id, "Origin workspace automation");
+    const [project] = await db.insert(projects).values({
+      companyId: company.id,
+      name: "Origin project",
+      status: "in_progress",
+    }).returning();
+    const [workspace] = await db.insert(projectWorkspaces).values({
+      companyId: company.id,
+      projectId: project!.id,
+      name: "Origin repository",
+      sourceType: "git_repo",
+      repoUrl: "https://github.com/example/origin-project",
+      isPrimary: true,
+    }).returning();
+    const originIssue = await issueService(db).create(company.id, {
+      projectId: project!.id,
+      projectWorkspaceId: workspace!.id,
+      title: "Origin work",
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("in_progress")!.id,
+      patch: {
+        config: {
+          automation: {
+            assigneeAgentId: routineSeed.assigneeAgentId,
+            instructionsBody: "Implement from the origin issue.",
+          },
+        },
+      },
+      actor: userActor,
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "origin-workspace-context",
+      title: "Origin workspace context",
+      originIssueId: originIssue.id,
+      actor: userActor,
+    });
+
+    const moved = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    });
+
+    expect(moved.automationExecution.status).toBe("succeeded");
+    const executionIssueId = moved.automationExecution.status === "succeeded"
+      ? moved.automationExecution.execution.executionIssueId
+      : null;
+    const [executionIssue] = await db.select({
+      projectId: issues.projectId,
+      projectWorkspaceId: issues.projectWorkspaceId,
+    }).from(issues).where(eq(issues.id, executionIssueId!));
+    expect(executionIssue).toEqual({
+      projectId: project!.id,
+      projectWorkspaceId: workspace!.id,
+    });
+  });
+
+  it("refuses a stage transition when repository preflight cannot resolve a workspace", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    const routineSeed = await seedRoutine(company.id, "Repository preflight automation");
+    const [project] = await db.insert(projects).values({
+      companyId: company.id,
+      name: "Unresolved project",
+      status: "in_progress",
+    }).returning();
+    const originIssue = await issueService(db).create(company.id, {
+      projectId: project!.id,
+      title: "Unresolved origin work",
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("in_progress")!.id,
+      patch: {
+        config: {
+          automation: {
+            assigneeAgentId: routineSeed.assigneeAgentId,
+            instructionsBody: "Needs a repository.",
+          },
+        },
+      },
+      actor: userActor,
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "repository-preflight",
+      title: "Repository preflight",
+      originIssueId: originIssue.id,
+      actor: userActor,
+    });
+    const preflightError = new Error("No repository could be resolved");
+    const preflightSvc = pipelineService(db, {
+      heartbeat: noopHeartbeat,
+      repositoryResolver: {
+        resolveForProject: vi.fn().mockRejectedValue(preflightError),
+      },
+    });
+
+    await expect(preflightSvc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    })).rejects.toThrow("No repository could be resolved");
+
+    const [unchanged] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
+    expect(unchanged).toMatchObject({
+      stageId: byKey.get("intake")!.id,
+      version: created.case.version,
+    });
+    expect(await db.select().from(pipelineAutomationExecutions)).toEqual([]);
   });
 
   it("defaults, preserves, and interpolates pipeline automation issue title templates", async () => {

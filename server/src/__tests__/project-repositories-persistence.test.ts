@@ -107,6 +107,85 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(request).toHaveBeenCalledTimes(3);
   });
 
+  it("creates missing repositories through an authorized grant as private", async () => {
+    const userId = `repo-creator-${Date.now()}`;
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: userId,
+      membershipRole: "admin",
+    });
+    const [app] = await db.insert(toolApplications).values({
+      companyId,
+      name: "repository creator",
+      type: "mcp_http",
+    }).returning();
+    const [secret] = await db.insert(companySecrets).values({
+      companyId,
+      name: "repository creator token",
+      key: "repository-creator-token",
+    }).returning();
+    const [connection] = await db.insert(toolConnections).values({
+      companyId,
+      applicationId: app!.id,
+      name: "Repository creator",
+      uid: `repository-creator-${Date.now()}`,
+      status: "active",
+      enabled: true,
+      transport: "mcp_remote",
+      authKind: "api_key",
+      credentialPolicy: "per_user",
+      config: { sourceTemplateKey: "github" },
+    }).returning();
+    await db.insert(connectionGrants).values({
+      companyId,
+      connectionId: connection!.id,
+      kind: "user",
+      subjectUserId: userId,
+      credentialSecretRefs: [{
+        secretId: secret!.id,
+        configPath: "credentials.authorization",
+        versionSelector: "latest",
+      }],
+    });
+    const request = vi.fn<typeof fetch>(async (url, init) => {
+      const parsed = new URL(String(url));
+      if (parsed.pathname === "/user/repos" && (init?.method ?? "GET") === "GET") {
+        return Response.json([]);
+      }
+      if (parsed.pathname === "/user") return Response.json({ login: "repo-creator" });
+      if (parsed.pathname === "/user/repos" && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          name: "new-private-repository",
+          private: true,
+          auto_init: true,
+        });
+        return Response.json({
+          id: 9001,
+          full_name: "repo-creator/new-private-repository",
+          private: true,
+        }, { status: 201 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const repository = await toolAccessService(db, { githubRequest: request })
+      .resolveOrCreatePrivateProjectRepository({
+        companyId,
+        userId,
+        owner: "repo-creator",
+        name: "new-private-repository",
+        createIfMissing: true,
+      });
+
+    expect(repository).toMatchObject({
+      id: "9001",
+      fullName: "repo-creator/new-private-repository",
+      private: true,
+      factoryCreated: true,
+    });
+  });
+
   it("rolls back the project if a later repository insert fails", async () => {
     const svc = projectService(db);
     await expect(svc.createWithRepositories(companyId, { name: "Rollback" }, [repo("7"), { ...repo("8"), fullName: "invalid" + String.fromCharCode(0) + "name" }])).rejects.toThrow();

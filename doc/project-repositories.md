@@ -50,6 +50,64 @@ intents retain their existing callback protocol. Standalone dialogs verify the s
 connection through the API after the sign-in popup returns to the instance. Project
 name and repository drafts stay mounted across setup and cancellation.
 
+## Factory repository resolution
+
+Projects may opt into repository resolution through
+`executionWorkspacePolicy.repositoryResolution`. Pipeline stage automation first
+inherits project and workspace context from the case's linked origin issue. When the
+project has no usable workspace, the resolver checks these sources in order:
+
+1. the project's existing primary workspace;
+2. `<localSearchRoot>/<repositoryName>` for each operator-configured absolute root;
+3. the exact `<githubOwner>/<repositoryName>` visible through the responsible user's
+   authorised GitHub grants;
+4. private GitHub repository creation when `createIfMissing` is enabled.
+
+The repository name defaults to the project's portable URL key. Account names,
+repository names, and host paths are configuration, never product constants. Local
+search is shallow and containment-checked after resolving symlinks; it does not scan
+the host. Agent credentials cannot set this policy, and managed-sandbox-only instances
+reject local search roots.
+
+```json
+{
+  "enabled": true,
+  "repositoryResolution": {
+    "version": 1,
+    "enabled": true,
+    "localSearchRoots": ["/srv/source"],
+    "githubOwner": "your-github-owner",
+    "repositoryName": "optional-explicit-name",
+    "createIfMissing": true,
+    "visibility": "private"
+  }
+}
+```
+
+`visibility` is private-only in version 1 and defaults to `private`. The GitHub create
+request also sends `private: true`, and the provider response must confirm that the new
+repository is private before Paperclip registers it. A missing credential, insufficient
+repository-creation permission, or unresolved repository fails the stage-entry preflight;
+the case does not move into an implementation stage with an unusable task. Provider
+credentials remain subject to company membership, grant ownership, audience, and
+responsible-user rules. Concurrent registration is serialized per project.
+
+Self-hosted operators can make the same policy the factory-wide default without
+hard-coding deployment identity into Paperclip:
+
+- `PAPERCLIP_FACTORY_REPOSITORY_LOCAL_ROOTS`: JSON array of absolute parent paths.
+- `PAPERCLIP_FACTORY_REPOSITORY_GITHUB_OWNER`: GitHub user or organisation login.
+- `PAPERCLIP_FACTORY_REPOSITORY_CREATE_IF_MISSING`: set to `false` to disable the
+  final creation step; when an owner is configured it otherwise defaults to `true`.
+
+The environment default is active only when at least one local root or GitHub owner is
+configured. A project's explicit `repositoryResolution` block overrides it, including
+`enabled: false` to opt that project out. Environment-driven creation remains
+private-only.
+
+This factory path is separate from `repositoryUrls` on the ordinary Create project API.
+Those URLs continue to register existing repositories only and never create a remote.
+
 ## UI review and verification
 
 `Proposals/Project repos` contains the reviewed states, including loading, failure,

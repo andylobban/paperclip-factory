@@ -178,6 +178,17 @@ export interface ProjectExecutionWorkspacePolicy {
   runtimePolicy?: Record<string, unknown> | null;
   cleanupPolicy?: Record<string, unknown> | null;
   authorizationPolicy?: TrustAuthorizationPolicy | null;
+  repositoryResolution?: ProjectRepositoryResolutionPolicy | null;
+}
+
+export interface ProjectRepositoryResolutionPolicy {
+  version: 1;
+  enabled: boolean;
+  localSearchRoots: string[];
+  githubOwner?: string | null;
+  repositoryName?: string | null;
+  createIfMissing: boolean;
+  visibility: "private";
 }
 
 export interface IssueExecutionWorkspaceSettings {

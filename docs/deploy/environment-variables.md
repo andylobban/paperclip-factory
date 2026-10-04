@@ -28,6 +28,9 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH` | (unset) | Host-local path to the immutable provider pack built by `pnpm --filter @paperclipai/paperclip-runner build:provider-pack`. The pack includes its target-built Node 24.11 runtime, locked production dependencies, OpenCode proxy/executable, and ACPX sidecar. Remote OpenCode and ACPX fail closed without it. A preinstalled pack is accepted only when its complete digested manifest matches this build-owned pack; otherwise Paperclip stages this pack into the sandbox. |
 | `PAPERCLIP_HIDDEN_SETTINGS` | (unset) | Comma-separated settings surfaces to hide from the UI and floor at the API, for operators hosting Paperclip for others (managed cloud, internal shared server). See [Hiding settings surfaces](#hiding-settings-surfaces). |
 | `PAPERCLIP_SETTING_DEFAULTS` | (unset) | JSON object replacing the schema default of selected instance settings, for hosting operators. See [Operator setting defaults](#operator-setting-defaults). |
+| `PAPERCLIP_FACTORY_REPOSITORY_LOCAL_ROOTS` | (unset) | JSON array of absolute parent paths searched for an exact project repository before GitHub. Symlink-resolved candidates must remain beneath a configured root. |
+| `PAPERCLIP_FACTORY_REPOSITORY_GITHUB_OWNER` | (unset) | GitHub user or organisation used for exact repository lookup and optional creation during pipeline stage preflight. |
+| `PAPERCLIP_FACTORY_REPOSITORY_CREATE_IF_MISSING` | `true` when a factory GitHub owner is configured | Set to `false` to stop after local and authorised GitHub lookup. Created repositories are always private. |
 
 Daytona connectivity for `paperclip_runner` uses authenticated provider
 WebSocket ingress and follows the instance experimental setting

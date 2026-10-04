@@ -16,6 +16,28 @@ const executionWorkspaceStrategySchema = z
   })
   .strict();
 
+export const projectRepositoryResolutionPolicySchema = z
+  .object({
+    version: z.literal(1).default(1),
+    enabled: z.boolean().default(false),
+    localSearchRoots: z.array(z.string().trim().min(1)).max(20).default([]),
+    githubOwner: z.string().trim().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/).optional().nullable(),
+    repositoryName: z.string().trim().regex(/^(?!\.{1,2}$)[A-Za-z0-9_.-]+$/).optional().nullable(),
+    createIfMissing: z.boolean().default(false),
+    /** Factory-created repositories are deliberately private-only. */
+    visibility: z.literal("private").default("private"),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.createIfMissing && !value.githubOwner) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["githubOwner"],
+        message: "githubOwner is required when createIfMissing is enabled",
+      });
+    }
+  });
+
 export const projectExecutionWorkspacePolicySchema = z
   .object({
     enabled: z.boolean(),
@@ -31,6 +53,7 @@ export const projectExecutionWorkspacePolicySchema = z
     runtimePolicy: z.record(z.string(), z.unknown()).optional().nullable(),
     cleanupPolicy: z.record(z.string(), z.unknown()).optional().nullable(),
     authorizationPolicy: trustAuthorizationPolicySchema.optional().nullable(),
+    repositoryResolution: projectRepositoryResolutionPolicySchema.optional().nullable(),
   })
   .strict();
 
@@ -133,3 +156,4 @@ export const updateProjectSchema = objectWithoutDefaults(
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
+export type ProjectRepositoryResolutionPolicy = z.infer<typeof projectRepositoryResolutionPolicySchema>;
