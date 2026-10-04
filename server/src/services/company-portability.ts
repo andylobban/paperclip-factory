@@ -1316,7 +1316,7 @@ function parseFiniteNumberLike(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function sanitizeImportedAgentRuntimeConfig(
+export function sanitizeImportedAgentRuntimeConfig(
   runtimeConfig: unknown,
   adapterType: string,
 ) {

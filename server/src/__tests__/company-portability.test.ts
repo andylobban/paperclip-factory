@@ -186,7 +186,14 @@ vi.mock("../routes/org-chart-svg.js", () => ({
   renderOrgChartPng: vi.fn(async () => Buffer.from("png")),
 }));
 
-const { companyPortabilityService, dedupeImportedCompanyName, parseGitHubSourceUrl, renderYamlBlock, renderFrontmatter } = await import("../services/company-portability.js");
+const {
+  companyPortabilityService,
+  dedupeImportedCompanyName,
+  parseGitHubSourceUrl,
+  renderYamlBlock,
+  renderFrontmatter,
+  sanitizeImportedAgentRuntimeConfig,
+} = await import("../services/company-portability.js");
 
 function asTextFile(entry: CompanyPortabilityFileEntry | undefined) {
   expect(typeof entry).toBe("string");
@@ -196,6 +203,31 @@ function asTextFile(entry: CompanyPortabilityFileEntry | undefined) {
 describe("company portability", () => {
   const paperclipKey = "paperclipai/paperclip/paperclip";
   const companyPlaybookKey = "company/company-1/company-playbook";
+
+  it("defaults imported OpenClaw agents to one concurrent run", () => {
+    expect(
+      sanitizeImportedAgentRuntimeConfig({}, "openclaw_gateway"),
+    ).toMatchObject({
+      heartbeat: {
+        enabled: false,
+        maxConcurrentRuns: 1,
+      },
+    });
+  });
+
+  it("preserves explicit imported OpenClaw concurrency", () => {
+    expect(
+      sanitizeImportedAgentRuntimeConfig(
+        { heartbeat: { maxConcurrentRuns: 4 } },
+        "openclaw_gateway",
+      ),
+    ).toMatchObject({
+      heartbeat: {
+        enabled: false,
+        maxConcurrentRuns: 4,
+      },
+    });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();

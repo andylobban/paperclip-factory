@@ -3640,6 +3640,45 @@ function normalizeMaxConcurrentRuns(
   );
 }
 
+function normalizeOptionalNonNegativeInteger(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const normalized = Math.floor(asNumber(value, 0));
+  return normalized >= 0 ? normalized : null;
+}
+
+export function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
+  const runtimeConfig = parseObject(agent.runtimeConfig);
+  const heartbeat = parseObject(runtimeConfig.heartbeat);
+
+  return {
+    enabled: asBoolean(heartbeat.enabled, false),
+    intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
+    wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+    maxConcurrentRuns: normalizeMaxConcurrentRuns(
+      heartbeat.maxConcurrentRuns,
+      defaultMaxConcurrentRunsForAdapter(agent.adapterType),
+    ),
+    skipTimerWhenNoActionableWork: asBoolean(
+      heartbeat.skipTimerWhenNoActionableWork ??
+        heartbeat.requireActionableTimerWork ??
+        heartbeat.issueOnlyTimer,
+      false,
+    ),
+    maxDailyRuns: normalizeOptionalNonNegativeInteger(
+      heartbeat.maxDailyRuns ??
+        heartbeat.dailyRunLimit ??
+        heartbeat.dailyRunCap ??
+        heartbeat.maxRunsPerDay,
+    ),
+    maxDailyCostCents: normalizeOptionalNonNegativeInteger(
+      heartbeat.maxDailyCostCents ??
+        heartbeat.dailyCostCentsLimit ??
+        heartbeat.dailySpendCentsLimit ??
+        heartbeat.dailyBudgetCents,
+    ),
+  };
+}
+
 interface WakeupOptions {
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
@@ -16570,45 +16609,6 @@ export function heartbeatService(
       message: "Scheduled retry was already promoted",
       scheduledRetry,
     };
-  }
-
-  function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
-    const runtimeConfig = parseObject(agent.runtimeConfig);
-    const heartbeat = parseObject(runtimeConfig.heartbeat);
-
-    return {
-      enabled: asBoolean(heartbeat.enabled, false),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(
-        heartbeat.maxConcurrentRuns,
-        defaultMaxConcurrentRunsForAdapter(agent.adapterType),
-      ),
-      skipTimerWhenNoActionableWork: asBoolean(
-        heartbeat.skipTimerWhenNoActionableWork ??
-          heartbeat.requireActionableTimerWork ??
-          heartbeat.issueOnlyTimer,
-        false,
-      ),
-      maxDailyRuns: normalizeOptionalNonNegativeInteger(
-        heartbeat.maxDailyRuns ??
-          heartbeat.dailyRunLimit ??
-          heartbeat.dailyRunCap ??
-          heartbeat.maxRunsPerDay,
-      ),
-      maxDailyCostCents: normalizeOptionalNonNegativeInteger(
-        heartbeat.maxDailyCostCents ??
-          heartbeat.dailyCostCentsLimit ??
-          heartbeat.dailySpendCentsLimit ??
-          heartbeat.dailyBudgetCents,
-      ),
-    };
-  }
-
-  function normalizeOptionalNonNegativeInteger(value: unknown) {
-    if (value === null || value === undefined || value === "") return null;
-    const normalized = Math.floor(asNumber(value, 0));
-    return normalized >= 0 ? normalized : null;
   }
 
   function currentUtcDayWindow(now = new Date()) {
