@@ -109,7 +109,7 @@ async function createControlledGatewayServer() {
               protocol: 3,
               server: { version: "test", connId: "conn-1" },
               features: {
-                methods: ["connect", "agent", "agent.wait"],
+                methods: ["connect", "agent", "agent.wait", "sessions.abort"],
                 events: ["agent"],
               },
               snapshot: { version: 1, ts: Date.now() },
@@ -161,6 +161,22 @@ async function createControlledGatewayServer() {
               status: "ok",
               startedAt: 1,
               endedAt: 2,
+            },
+          }),
+        );
+        return;
+      }
+
+      if (frame.method === "sessions.abort") {
+        socket.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              ok: true,
+              status: "aborted",
+              abortedRunId: frame.params?.runId,
             },
           }),
         );
