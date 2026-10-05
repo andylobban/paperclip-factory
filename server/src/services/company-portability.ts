@@ -47,6 +47,7 @@ import type {
 } from "@paperclipai/shared";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  defaultMaxConcurrentRunsForAdapter,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   PROJECT_ICON_NAMES,
@@ -1315,13 +1316,16 @@ function parseFiniteNumberLike(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function sanitizeImportedAgentRuntimeConfig(runtimeConfig: unknown) {
+export function sanitizeImportedAgentRuntimeConfig(
+  runtimeConfig: unknown,
+  adapterType: string,
+) {
   const next = clonePortableRecord(runtimeConfig) ?? {};
   delete next.modelProfiles;
   const heartbeat = isPlainRecord(next.heartbeat) ? { ...next.heartbeat } : {};
   heartbeat.enabled = false;
   if (parseFiniteNumberLike(heartbeat.maxConcurrentRuns) == null) {
-    heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+    heartbeat.maxConcurrentRuns = defaultMaxConcurrentRunsForAdapter(adapterType);
   }
   next.heartbeat = heartbeat;
   if (isPlainRecord(next.debug)) {
@@ -5601,7 +5605,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             reportsTo: null,
             adapterType: normalizedAdapter.adapterType,
             adapterConfig: normalizedAdapter.adapterConfig,
-            runtimeConfig: sanitizeImportedAgentRuntimeConfig(manifestAgent.runtimeConfig),
+            runtimeConfig: sanitizeImportedAgentRuntimeConfig(
+              manifestAgent.runtimeConfig,
+              normalizedAdapter.adapterType,
+            ),
             budgetMonthlyCents: manifestAgent.budgetMonthlyCents,
             permissions: manifestAgent.permissions,
             metadata: manifestAgent.metadata,

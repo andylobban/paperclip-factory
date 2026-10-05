@@ -41,11 +41,16 @@ function buildContext(
 
 async function createMockGatewayServer(options?: {
   waitPayload?: Record<string, unknown>;
+  holdWait?: boolean;
+  emitAgentEvents?: boolean;
+  abortResponsePayload?: Record<string, unknown>;
 }) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
 
   let agentPayload: Record<string, unknown> | null = null;
+  let abortPayload: Record<string, unknown> | null = null;
+  let waitRequestCount = 0;
 
   wss.on("connection", (socket) => {
     socket.send(
@@ -77,7 +82,7 @@ async function createMockGatewayServer(options?: {
               type: "hello-ok",
               protocol: 3,
               server: { version: "test", connId: "conn-1" },
-              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              features: { methods: ["connect", "agent", "agent.wait", "sessions.abort"], events: ["agent"] },
               snapshot: { version: 1, ts: Date.now() },
               policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
             },
@@ -106,36 +111,40 @@ async function createMockGatewayServer(options?: {
           }),
         );
 
-        socket.send(
-          JSON.stringify({
-            type: "event",
-            event: "agent",
-            payload: {
-              runId,
-              seq: 1,
-              stream: "assistant",
-              ts: Date.now(),
-              data: { delta: "cha" },
-            },
-          }),
-        );
-        socket.send(
-          JSON.stringify({
-            type: "event",
-            event: "agent",
-            payload: {
-              runId,
-              seq: 2,
-              stream: "assistant",
-              ts: Date.now(),
-              data: { delta: "chacha" },
-            },
-          }),
-        );
+        if (options?.emitAgentEvents !== false) {
+          socket.send(
+            JSON.stringify({
+              type: "event",
+              event: "agent",
+              payload: {
+                runId,
+                seq: 1,
+                stream: "assistant",
+                ts: Date.now(),
+                data: { delta: "cha" },
+              },
+            }),
+          );
+          socket.send(
+            JSON.stringify({
+              type: "event",
+              event: "agent",
+              payload: {
+                runId,
+                seq: 2,
+                stream: "assistant",
+                ts: Date.now(),
+                data: { delta: "chacha" },
+              },
+            }),
+          );
+        }
         return;
       }
 
       if (frame.method === "agent.wait") {
+        waitRequestCount += 1;
+        if (options?.holdWait) return;
         socket.send(
           JSON.stringify({
             type: "res",
@@ -146,6 +155,23 @@ async function createMockGatewayServer(options?: {
               status: "ok",
               startedAt: 1,
               endedAt: 2,
+            },
+          }),
+        );
+        return;
+      }
+
+      if (frame.method === "sessions.abort") {
+        abortPayload = frame.params ?? null;
+        socket.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: options?.abortResponsePayload ?? {
+              ok: true,
+              status: "aborted",
+              abortedRunId: frame.params?.runId,
             },
           }),
         );
@@ -165,6 +191,8 @@ async function createMockGatewayServer(options?: {
   return {
     url: `ws://127.0.0.1:${address.port}`,
     getAgentPayload: () => agentPayload,
+    getAbortPayload: () => abortPayload,
+    getWaitRequestCount: () => waitRequestCount,
     close: async () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -515,6 +543,184 @@ describe("openclaw gateway adapter execute", () => {
     const result = await execute(buildContext({}));
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("openclaw_gateway_url_missing");
+  });
+
+  it("aborts and verifies the remote run before returning a queue timeout", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: { runId: "run-123", status: "timeout" },
+      emitAgentEvents: false,
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          waitTimeoutMs: 40,
+          queueTimeoutMs: 40,
+          idleTimeoutMs: 40,
+          waitPollIntervalMs: 10,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        timedOut: true,
+        errorCode: "openclaw_gateway_wait_timeout",
+        errorMessage: "OpenClaw gateway run did not start within 40ms",
+        resultJson: {
+          executionCancellation: {
+            state: "acknowledged",
+            providerMethod: "sessions.abort",
+          },
+        },
+      });
+      expect(gateway.getWaitRequestCount()).toBeGreaterThan(1);
+      expect(gateway.getAbortPayload()).toEqual({
+        runId: "run-123",
+        key: "paperclip:issue:issue-123",
+        clearQueued: true,
+      });
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("fails closed when a timeout cancellation is not acknowledged by the gateway", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: { runId: "run-123", status: "timeout" },
+      emitAgentEvents: false,
+      abortResponsePayload: { ok: true, status: "queued" },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          waitTimeoutMs: 40,
+          queueTimeoutMs: 40,
+          idleTimeoutMs: 40,
+          waitPollIntervalMs: 10,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        exitCode: 1,
+        timedOut: true,
+        errorCode: "openclaw_gateway_cancel_unverified",
+        resultJson: {
+          executionCancellation: {
+            state: "requested",
+            providerMethod: "sessions.abort",
+            providerResult: { ok: true, status: "queued" },
+          },
+        },
+      });
+      expect(result.errorMessage).toContain("remote termination could not be verified");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("uses the idle deadline after receiving remote activity", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: { runId: "run-123", status: "timeout" },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          waitTimeoutMs: 40,
+          queueTimeoutMs: 20,
+          idleTimeoutMs: 60,
+          waitPollIntervalMs: 10,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        timedOut: true,
+        errorCode: "openclaw_gateway_wait_timeout",
+        errorMessage: "OpenClaw gateway run produced no activity for 60ms",
+        resultJson: {
+          executionCancellation: { state: "acknowledged" },
+        },
+      });
+      expect(gateway.getWaitRequestCount()).toBeGreaterThanOrEqual(4);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("uses the cancellation handshake to stop a live remote run", async () => {
+    const gateway = await createMockGatewayServer({ holdWait: true });
+    const controller = new AbortController();
+    let cancellationReady = false;
+
+    try {
+      const resultPromise = execute(
+        buildContext(
+          {
+            url: gateway.url,
+            disableDeviceAuth: true,
+            waitTimeoutMs: 2_000,
+          },
+          {
+            signal: controller.signal,
+            onCancellationReady: async () => {
+              cancellationReady = true;
+            },
+            onLog: async (_stream, chunk) => {
+              if (chunk.includes("agent accepted")) controller.abort();
+            },
+          },
+        ),
+      );
+
+      const result = await resultPromise;
+      expect(cancellationReady).toBe(true);
+      expect(result).toMatchObject({
+        errorCode: "cancelled",
+        resultJson: {
+          executionCancellation: {
+            state: "acknowledged",
+            providerMethod: "sessions.abort",
+          },
+        },
+      });
+      expect(gateway.getAbortPayload()).toEqual(
+        expect.objectContaining({ runId: "run-123", clearQueued: true }),
+      );
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("forwards gateway activity as structured adapter events", async () => {
+    const gateway = await createMockGatewayServer();
+    const events: Array<Record<string, unknown>> = [];
+
+    try {
+      const result = await execute(
+        buildContext(
+          { url: gateway.url, disableDeviceAuth: true, waitTimeoutMs: 2_000 },
+          { onEvent: async (event) => events.push(event as unknown as Record<string, unknown>) },
+        ),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            eventType: "openclaw.gateway.event",
+            message: "OpenClaw assistant activity",
+          }),
+        ]),
+      );
+    } finally {
+      await gateway.close();
+    }
   });
 
   it("returns adapter-managed runtime services from gateway result meta", async () => {

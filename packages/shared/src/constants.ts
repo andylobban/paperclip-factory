@@ -75,6 +75,15 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 };
 
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 20;
+export const AGENT_SERIAL_GATEWAY_DEFAULT_MAX_CONCURRENT_RUNS = 1;
+
+export function defaultMaxConcurrentRunsForAdapter(
+  adapterType: string | null | undefined,
+): number {
+  return adapterType === "openclaw_gateway"
+    ? AGENT_SERIAL_GATEWAY_DEFAULT_MAX_CONCURRENT_RUNS
+    : AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+}
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 
 // Config keys owned by Paperclip/company state rather than one concrete adapter.

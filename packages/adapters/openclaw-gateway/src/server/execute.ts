@@ -90,6 +90,12 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
+type GatewayCancellation = {
+  acknowledged: boolean;
+  payload: Record<string, unknown> | null;
+  errorMessage?: string;
+};
+
 const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
@@ -516,6 +522,60 @@ export function buildAgentParams(input: {
   }
 
   return agentParams;
+}
+
+function acknowledgedCancellationResult(input: {
+  resultJson: Record<string, unknown> | null;
+  cancellation: GatewayCancellation;
+  errorCode: string;
+  errorMessage: string;
+  timedOut: boolean;
+}): AdapterExecutionResult {
+  const acknowledgedAt = new Date().toISOString();
+  return {
+    exitCode: null,
+    signal: null,
+    timedOut: input.timedOut,
+    errorCode: input.errorCode,
+    errorMessage: input.errorMessage,
+    resultJson: {
+      ...(input.resultJson ?? {}),
+      executionCancellation: {
+        state: "acknowledged",
+        acknowledgedAt,
+        forced: false,
+        providerMethod: "sessions.abort",
+        providerResult: input.cancellation.payload,
+      },
+    },
+  };
+}
+
+function unverifiedCancellationResult(input: {
+  resultJson: Record<string, unknown> | null;
+  cancellation: GatewayCancellation;
+  errorCode: string;
+  errorMessage: string;
+  timedOut: boolean;
+}): AdapterExecutionResult {
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: input.timedOut,
+    errorCode: input.errorCode,
+    errorMessage: `${input.errorMessage}; remote termination could not be verified${
+      input.cancellation.errorMessage ? `: ${input.cancellation.errorMessage}` : ""
+    }`,
+    resultJson: {
+      ...(input.resultJson ?? {}),
+      executionCancellation: {
+        state: "requested",
+        requestedAt: new Date().toISOString(),
+        providerMethod: "sessions.abort",
+        providerResult: input.cancellation.payload,
+      },
+    },
+  };
 }
 
 function normalizeUrl(input: string): URL | null {
@@ -1081,6 +1141,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
   const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
   const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
+  const queueTimeoutMs = parseOptionalPositiveInteger(ctx.config.queueTimeoutMs) ?? waitTimeoutMs;
+  const idleTimeoutMs = parseOptionalPositiveInteger(ctx.config.idleTimeoutMs) ?? waitTimeoutMs;
+  const waitPollIntervalMs = Math.min(
+    parseOptionalPositiveInteger(ctx.config.waitPollIntervalMs) ?? 5_000,
+    queueTimeoutMs,
+    idleTimeoutMs,
+  );
 
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
@@ -1199,6 +1266,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const assistantChunks: string[] = [];
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
+    let lastRemoteActivityAt: number | null = null;
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
@@ -1219,10 +1287,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       const stream = nonEmpty(payload.stream) ?? "unknown";
       const data = asRecord(payload.data) ?? {};
+      lastRemoteActivityAt = Date.now();
       await ctx.onLog(
         "stdout",
         `[openclaw-gateway:event] run=${runId} stream=${stream} data=${stringifyForLog(data, 8_000)}\n`,
       );
+      await ctx.onEvent?.({
+        eventType: "openclaw.gateway.event",
+        stream: stream === "error" ? "stderr" : "system",
+        level: stream === "error" ? "error" : "info",
+        message: `OpenClaw ${stream} activity`,
+        payload: {
+          runId,
+          stream,
+          data: redactForLog(data),
+          ...(typeof frame.seq === "number" ? { gatewaySeq: frame.seq } : {}),
+        },
+      });
 
       if (stream === "assistant") {
         const delta = nonEmpty(data.delta);
@@ -1254,6 +1335,87 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onEvent,
       onLog: ctx.onLog,
     });
+    let cancellationPromise: Promise<GatewayCancellation> | null = null;
+    let acceptedRunIdForCancellation: string | null = null;
+    let resolveCancellationRequested!: () => void;
+    const cancellationRequested = new Promise<void>((resolve) => {
+      resolveCancellationRequested = resolve;
+    });
+    const onAbort = () => resolveCancellationRequested();
+
+    const cancelRemote = (reason: string): Promise<GatewayCancellation> => {
+      if (cancellationPromise) return cancellationPromise;
+      cancellationPromise = (async () => {
+        const params = {
+          runId: acceptedRunIdForCancellation ?? ctx.runId,
+          key: sessionKey,
+          ...(configuredAgentId ? { agentId: configuredAgentId } : {}),
+          clearQueued: true,
+        };
+        await ctx.onLog(
+          "stdout",
+          `[openclaw-gateway] requesting remote cancellation reason=${reason} runId=${params.runId}\n`,
+        );
+        try {
+          const payload = await client.request<Record<string, unknown>>(
+            "sessions.abort",
+            params,
+            { timeoutMs: connectTimeoutMs },
+          );
+          const status = nonEmpty(payload?.status)?.toLowerCase();
+          const acknowledged =
+            payload?.ok !== false && (status === "aborted" || status === "no-active-run");
+          if (!acknowledged) {
+            return {
+              acknowledged: false,
+              payload: asRecord(payload),
+              errorMessage: `unexpected sessions.abort status ${status || "missing"}`,
+            };
+          }
+          await ctx.onLog(
+            "stdout",
+            `[openclaw-gateway] remote cancellation acknowledged status=${status} runId=${params.runId}\n`,
+          );
+          return { acknowledged: true, payload: asRecord(payload) };
+        } catch (error) {
+          return {
+            acknowledged: false,
+            payload: null,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })();
+      return cancellationPromise;
+    };
+
+    const cancellationResult = async (input: {
+      reason: "operator" | "queue_timeout" | "idle_timeout";
+      latestPayload: unknown;
+    }): Promise<AdapterExecutionResult> => {
+      const timedOut = input.reason !== "operator";
+      const errorMessage =
+        input.reason === "operator"
+          ? "OpenClaw gateway run cancelled"
+          : input.reason === "queue_timeout"
+            ? `OpenClaw gateway run did not start within ${queueTimeoutMs}ms`
+            : `OpenClaw gateway run produced no activity for ${idleTimeoutMs}ms`;
+      const cancellation = await cancelRemote(input.reason);
+      const common = {
+        resultJson: asRecord(input.latestPayload),
+        cancellation,
+        timedOut,
+        errorMessage,
+      };
+      return cancellation.acknowledged
+        ? acknowledgedCancellationResult({
+            ...common,
+            errorCode: timedOut ? "openclaw_gateway_wait_timeout" : "cancelled",
+          })
+        : unverifiedCancellationResult({
+            ...common,
+            errorCode: "openclaw_gateway_cancel_unverified",
+          });
+    };
 
     try {
       deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
@@ -1321,19 +1483,66 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[openclaw-gateway] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}\n`,
       );
 
+      ctx.signal?.addEventListener("abort", onAbort, { once: true });
+      await ctx.onCancellationReady?.();
+      if (ctx.signal?.aborted) {
+        return {
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+          errorCode: "cancelled",
+          errorMessage: "Stopped before OpenClaw provider startup",
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          resultJson: {
+            executionCancellation: {
+              state: "acknowledged",
+              acknowledgedAt: new Date().toISOString(),
+              forced: false,
+            },
+          },
+        };
+      }
+
       // Keep any server-side continuation lock through retryable websocket
       // setup and backoff. The first agent request is the remote-work boundary:
       // once it is sent, retrying would be unsafe because the gateway may have
       // accepted work even if the response is lost.
       reportDispatch();
-      const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
-        timeoutMs: connectTimeoutMs,
-      });
+      if (ctx.signal?.aborted) {
+        return {
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+          errorCode: "cancelled",
+          errorMessage: "Stopped before OpenClaw provider startup",
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          resultJson: {
+            executionCancellation: {
+              state: "acknowledged",
+              acknowledgedAt: new Date().toISOString(),
+              forced: false,
+            },
+          },
+        };
+      }
+      const acceptedOutcome = await Promise.race([
+        client
+          .request<Record<string, unknown>>("agent", agentParams, {
+            timeoutMs: connectTimeoutMs,
+          })
+          .then((payload) => ({ kind: "accepted" as const, payload })),
+        cancellationRequested.then(() => ({ kind: "cancelled" as const })),
+      ]);
+      if (acceptedOutcome.kind === "cancelled") {
+        return await cancellationResult({ reason: "operator", latestPayload: latestResultPayload });
+      }
+      const acceptedPayload = acceptedOutcome.payload;
 
       latestResultPayload = acceptedPayload;
 
       const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+      acceptedRunIdForCancellation = acceptedRunId;
       trackedRunIds.add(acceptedRunId);
 
       await ctx.onLog(
@@ -1355,49 +1564,64 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
-          "agent.wait",
-          { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
-        );
+        const acceptedAt = Date.now();
+        while (true) {
+          if (ctx.signal?.aborted) {
+            return await cancellationResult({ reason: "operator", latestPayload: latestResultPayload });
+          }
+          const deadlineAt = lastRemoteActivityAt === null
+            ? acceptedAt + queueTimeoutMs
+            : lastRemoteActivityAt + idleTimeoutMs;
+          const remainingMs = deadlineAt - Date.now();
+          if (remainingMs <= 0) {
+            return await cancellationResult({
+              reason: lastRemoteActivityAt === null ? "queue_timeout" : "idle_timeout",
+              latestPayload: latestResultPayload,
+            });
+          }
+          const pollMs = Math.max(1, Math.min(waitPollIntervalMs, remainingMs));
+          const waitOutcome = await Promise.race([
+            client
+              .request<Record<string, unknown>>(
+                "agent.wait",
+                { runId: acceptedRunId, timeoutMs: pollMs },
+                { timeoutMs: pollMs + connectTimeoutMs },
+              )
+              .then((payload) => ({ kind: "wait" as const, payload })),
+            cancellationRequested.then(() => ({ kind: "cancelled" as const })),
+          ]);
+          if (waitOutcome.kind === "cancelled") {
+            return await cancellationResult({ reason: "operator", latestPayload: latestResultPayload });
+          }
 
-        latestResultPayload = waitPayload;
-
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
-        if (waitStatus === "timeout") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: true,
-            errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-            errorCode: "openclaw_gateway_wait_timeout",
-            resultJson: waitPayload,
-          };
-        }
-
-        if (waitStatus === "error") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage:
-              nonEmpty(waitPayload?.error) ??
-              lifecycleError ??
-              "OpenClaw gateway run failed",
-            errorCode: "openclaw_gateway_wait_error",
-            resultJson: waitPayload,
-          };
-        }
-
-        if (waitStatus && waitStatus !== "ok") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
-            errorCode: "openclaw_gateway_wait_status_unexpected",
-            resultJson: waitPayload,
-          };
+          const waitPayload = waitOutcome.payload;
+          latestResultPayload = waitPayload;
+          const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          if (waitStatus === "timeout") continue;
+          if (waitStatus === "error") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage:
+                nonEmpty(waitPayload?.error) ??
+                lifecycleError ??
+                "OpenClaw gateway run failed",
+              errorCode: "openclaw_gateway_wait_error",
+              resultJson: waitPayload,
+            };
+          }
+          if (waitStatus && waitStatus !== "ok") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
+              errorCode: "openclaw_gateway_wait_status_unexpected",
+              resultJson: waitPayload,
+            };
+          }
+          break;
         }
       }
 
@@ -1525,6 +1749,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resultJson: asRecord(latestResultPayload),
       };
     } finally {
+      ctx.signal?.removeEventListener("abort", onAbort);
       client.close();
     }
   }

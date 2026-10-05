@@ -88,6 +88,7 @@ import {
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  defaultMaxConcurrentRunsForAdapter,
   CHAT_PROVIDERS,
   CONNECTION_INTENT_AGENT_GUIDANCE,
   CONNECTION_RUNTIME_TOOL_NAMES,
@@ -3625,15 +3626,57 @@ export function compactRunLogChunk(
   return `${normalized.slice(0, headChars)}${marker}${normalized.slice(normalized.length - tailChars)}`;
 }
 
-function normalizeMaxConcurrentRuns(value: unknown) {
+function normalizeMaxConcurrentRuns(
+  value: unknown,
+  fallback = HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT,
+) {
   const parsed = Math.floor(
-    asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT),
+    asNumber(value, fallback),
   );
-  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
+  if (!Number.isFinite(parsed)) return fallback;
   return Math.max(
     HEARTBEAT_MAX_CONCURRENT_RUNS_MIN,
     Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed),
   );
+}
+
+function normalizeOptionalNonNegativeInteger(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const normalized = Math.floor(asNumber(value, 0));
+  return normalized >= 0 ? normalized : null;
+}
+
+export function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
+  const runtimeConfig = parseObject(agent.runtimeConfig);
+  const heartbeat = parseObject(runtimeConfig.heartbeat);
+
+  return {
+    enabled: asBoolean(heartbeat.enabled, false),
+    intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
+    wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+    maxConcurrentRuns: normalizeMaxConcurrentRuns(
+      heartbeat.maxConcurrentRuns,
+      defaultMaxConcurrentRunsForAdapter(agent.adapterType),
+    ),
+    skipTimerWhenNoActionableWork: asBoolean(
+      heartbeat.skipTimerWhenNoActionableWork ??
+        heartbeat.requireActionableTimerWork ??
+        heartbeat.issueOnlyTimer,
+      false,
+    ),
+    maxDailyRuns: normalizeOptionalNonNegativeInteger(
+      heartbeat.maxDailyRuns ??
+        heartbeat.dailyRunLimit ??
+        heartbeat.dailyRunCap ??
+        heartbeat.maxRunsPerDay,
+    ),
+    maxDailyCostCents: normalizeOptionalNonNegativeInteger(
+      heartbeat.maxDailyCostCents ??
+        heartbeat.dailyCostCentsLimit ??
+        heartbeat.dailySpendCentsLimit ??
+        heartbeat.dailyBudgetCents,
+    ),
+  };
 }
 
 interface WakeupOptions {
@@ -16566,44 +16609,6 @@ export function heartbeatService(
       message: "Scheduled retry was already promoted",
       scheduledRetry,
     };
-  }
-
-  function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
-    const runtimeConfig = parseObject(agent.runtimeConfig);
-    const heartbeat = parseObject(runtimeConfig.heartbeat);
-
-    return {
-      enabled: asBoolean(heartbeat.enabled, false),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(
-        heartbeat.maxConcurrentRuns,
-      ),
-      skipTimerWhenNoActionableWork: asBoolean(
-        heartbeat.skipTimerWhenNoActionableWork ??
-          heartbeat.requireActionableTimerWork ??
-          heartbeat.issueOnlyTimer,
-        false,
-      ),
-      maxDailyRuns: normalizeOptionalNonNegativeInteger(
-        heartbeat.maxDailyRuns ??
-          heartbeat.dailyRunLimit ??
-          heartbeat.dailyRunCap ??
-          heartbeat.maxRunsPerDay,
-      ),
-      maxDailyCostCents: normalizeOptionalNonNegativeInteger(
-        heartbeat.maxDailyCostCents ??
-          heartbeat.dailyCostCentsLimit ??
-          heartbeat.dailySpendCentsLimit ??
-          heartbeat.dailyBudgetCents,
-      ),
-    };
-  }
-
-  function normalizeOptionalNonNegativeInteger(value: unknown) {
-    if (value === null || value === undefined || value === "") return null;
-    const normalized = Math.floor(asNumber(value, 0));
-    return normalized >= 0 ? normalized : null;
   }
 
   function currentUtcDayWindow(now = new Date()) {

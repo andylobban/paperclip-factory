@@ -1174,6 +1174,40 @@ describe.sequential("agent permission routes", () => {
     );
   });
 
+  it("defaults serial OpenClaw gateways to one concurrent run", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "OpenClaw Builder",
+        role: "engineer",
+        adapterType: "openclaw_gateway",
+        adapterConfig: { url: "ws://127.0.0.1:18789" },
+        runtimeConfig: { heartbeat: { enabled: false } },
+      }));
+
+    expect([200, 201]).toContain(res.status);
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({
+        runtimeConfig: {
+          heartbeat: {
+            enabled: false,
+            maxConcurrentRuns: 1,
+          },
+        },
+      }),
+      { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+    );
+  });
+
   it("seeds opencode agent creation with the static default model without live discovery", async () => {
     mockEnsureOpenCodeModelConfiguredAndAvailable.mockRejectedValue(
       new Error("`opencode models` should not be called during creation"),
