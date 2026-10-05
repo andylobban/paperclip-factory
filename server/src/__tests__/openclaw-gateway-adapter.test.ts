@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { WebSocketServer } from "ws";
 import { execute, testEnvironment } from "@paperclipai/adapter-openclaw-gateway/server";
 import {
@@ -7,6 +10,14 @@ import {
   parseOpenClawGatewayStdoutLine,
 } from "@paperclipai/adapter-openclaw-gateway/ui";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+
+const credentialDirectories = new Set<string>();
+
+function createClaimedApiKeyPath(): string {
+  const directory = mkdtempSync(path.join(tmpdir(), "paperclip-openclaw-adapter-test-"));
+  credentialDirectories.add(directory);
+  return path.join(directory, "claimed-api-key");
+}
 
 function buildContext(
   config: Record<string, unknown>,
@@ -27,13 +38,17 @@ function buildContext(
       sessionDisplayId: null,
       taskKey: null,
     },
-    config,
+    config: {
+      claimedApiKeyPath: createClaimedApiKeyPath(),
+      ...config,
+    },
     context: {
       taskId: "task-123",
       issueId: "issue-123",
       wakeReason: "issue_assigned",
       issueIds: ["issue-123"],
     },
+    authToken: "paperclip-run-jwt",
     onLog: async () => {},
     ...overrides,
   };
@@ -403,7 +418,10 @@ async function createMockGatewayServerWithPairing() {
 }
 
 afterEach(() => {
-  // no global mocks
+  for (const directory of credentialDirectories) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  credentialDirectories.clear();
 });
 
 describe("openclaw gateway ui stdout parser", () => {
@@ -424,6 +442,21 @@ describe("openclaw gateway ui stdout parser", () => {
 });
 
 describe("openclaw gateway adapter execute", () => {
+  it("fails closed when a task-scoped Paperclip credential is missing", async () => {
+    const result = await execute(
+      buildContext(
+        { url: "ws://127.0.0.1:1" },
+        { authToken: undefined },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      timedOut: false,
+      errorCode: "openclaw_gateway_task_credential_missing",
+    });
+  });
+
   it("runs connect -> agent -> agent.wait and forwards wake payload", async () => {
     const gateway = await createMockGatewayServer();
     const logs: string[] = [];
