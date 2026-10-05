@@ -5,6 +5,7 @@ import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
 import { and, asc, eq, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
 import {
+  agents,
   agentWakeupRequests,
   chatActions,
   environmentLeases,
@@ -40,6 +41,7 @@ const EXECUTION_RECONCILIATION_CONTINUATION_DELIVERIES = new Set([
   "pending",
   "delegated",
   "delivered",
+  "not_required",
   "invalidated",
 ] as const);
 
@@ -154,6 +156,33 @@ export async function validateExecutionReconciliation(input: {
       "The recovery source or task owner changed. Inspect the current execution before continuing.",
     );
   }
+  const [runAgent] = await db
+    .select({ adapterType: agents.adapterType })
+    .from(agents)
+    .where(
+      and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)),
+    );
+  if (runAgent?.adapterType === "openclaw_gateway") {
+    const settlement =
+      run.resultJson?.providerSettlement as Record<string, unknown> | undefined;
+    const settledAt =
+      typeof settlement?.settledAt === "string"
+        ? Date.parse(settlement.settledAt)
+        : Number.NaN;
+    if (
+      settlement?.state !== "terminal" ||
+      typeof settlement.runId !== "string" ||
+      settlement.runId.length === 0 ||
+      typeof settlement.terminalStatus !== "string" ||
+      settlement.terminalStatus.length === 0 ||
+      !Number.isFinite(settledAt)
+    ) {
+      throw conflict(
+        "The OpenClaw provider has not supplied an authoritative terminal receipt. Keep this execution fenced until its exact provider run settles.",
+        { code: "execution_provider_settlement_required", runId: run.id },
+      );
+    }
+  }
   for (const pid of [
     run.processPid,
     run.processGroupId ? -run.processGroupId : null,
@@ -221,6 +250,7 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
+  options: { continuationRequired?: boolean } = {},
 ) {
   if (deliveryOwner) {
     const [retry] = await db
@@ -322,7 +352,11 @@ export async function markExecutionReconciliation(
         ...action.evidence,
         automaticRecovery: undefined,
         executionReconciliation: recordedDecision,
-        continuationDelivery: deliveryOwner ? "delegated" : "pending",
+        continuationDelivery: deliveryOwner
+          ? "delegated"
+          : options.continuationRequired === false
+            ? "not_required"
+            : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
     })

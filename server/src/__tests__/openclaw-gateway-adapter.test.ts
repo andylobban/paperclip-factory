@@ -59,6 +59,7 @@ async function createMockGatewayServer(options?: {
   holdWait?: boolean;
   emitAgentEvents?: boolean;
   abortResponsePayload?: Record<string, unknown>;
+  settleAfterAbort?: boolean;
 }) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
@@ -159,6 +160,21 @@ async function createMockGatewayServer(options?: {
 
       if (frame.method === "agent.wait") {
         waitRequestCount += 1;
+        if (abortPayload && options?.settleAfterAbort !== false) {
+          socket.send(
+            JSON.stringify({
+              type: "res",
+              id: frame.id,
+              ok: true,
+              payload: {
+                runId: frame.params?.runId,
+                status: "cancelled",
+                endedAt: Date.now(),
+              },
+            }),
+          );
+          return;
+        }
         if (options?.holdWait) return;
         socket.send(
           JSON.stringify({
@@ -605,6 +621,11 @@ describe("openclaw gateway adapter execute", () => {
             state: "acknowledged",
             providerMethod: "sessions.abort",
           },
+          providerSettlement: {
+            state: "terminal",
+            runId: "run-123",
+            terminalStatus: "cancelled",
+          },
         },
       });
       expect(gateway.getWaitRequestCount()).toBeGreaterThan(1);
@@ -623,6 +644,7 @@ describe("openclaw gateway adapter execute", () => {
       waitPayload: { runId: "run-123", status: "timeout" },
       emitAgentEvents: false,
       abortResponsePayload: { ok: true, status: "queued" },
+      settleAfterAbort: false,
     });
 
     try {
@@ -634,6 +656,7 @@ describe("openclaw gateway adapter execute", () => {
           queueTimeoutMs: 40,
           idleTimeoutMs: 40,
           waitPollIntervalMs: 10,
+          cancelSettlementTimeoutMs: 50,
         }),
       );
 
@@ -650,6 +673,42 @@ describe("openclaw gateway adapter execute", () => {
         },
       });
       expect(result.errorMessage).toContain("remote termination could not be verified");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("does not treat an abort acknowledgement as terminal provider settlement", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: { runId: "run-123", status: "timeout" },
+      emitAgentEvents: false,
+      settleAfterAbort: false,
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          waitTimeoutMs: 30,
+          queueTimeoutMs: 30,
+          idleTimeoutMs: 30,
+          waitPollIntervalMs: 10,
+          cancelSettlementTimeoutMs: 50,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        exitCode: 1,
+        errorCode: "openclaw_gateway_cancel_unverified",
+        resultJson: {
+          executionCancellation: {
+            state: "requested",
+            providerAcknowledgedAt: expect.any(String),
+          },
+        },
+      });
+      expect(result.resultJson).not.toHaveProperty("providerSettlement");
     } finally {
       await gateway.close();
     }
@@ -678,6 +737,7 @@ describe("openclaw gateway adapter execute", () => {
         errorMessage: "OpenClaw gateway run produced no activity for 60ms",
         resultJson: {
           executionCancellation: { state: "acknowledged" },
+          providerSettlement: { state: "terminal" },
         },
       });
       expect(gateway.getWaitRequestCount()).toBeGreaterThanOrEqual(4);
@@ -698,6 +758,7 @@ describe("openclaw gateway adapter execute", () => {
             url: gateway.url,
             disableDeviceAuth: true,
             waitTimeoutMs: 2_000,
+            cancelSettlementTimeoutMs: 100,
           },
           {
             signal: controller.signal,
@@ -719,6 +780,10 @@ describe("openclaw gateway adapter execute", () => {
           executionCancellation: {
             state: "acknowledged",
             providerMethod: "sessions.abort",
+          },
+          providerSettlement: {
+            state: "terminal",
+            terminalStatus: "cancelled",
           },
         },
       });

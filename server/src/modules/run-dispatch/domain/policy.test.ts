@@ -355,6 +355,32 @@ describe("decideQueuedRunStaleness", () => {
     expect(decision).toMatchObject({ errorCode });
   });
 
+  it("keeps a resolved-interaction reviewer run when the executor remains the issue assignee", () => {
+    expect(
+      decideQueuedRunStaleness(
+        {
+          ...baseStalenessFacts(),
+          runAgentId: "reviewer-agent",
+          issueAssigneeAgentId: "executor-agent",
+          issueStatus: "in_review",
+          isResolvedInteractionContinuation: true,
+          reviewParticipant: {
+            isInReview: true,
+            hasParticipant: true,
+            participantIsAgent: true,
+            participantAgentId: "reviewer-agent",
+            currentStageType: "review",
+            currentParticipant: {
+              type: "agent",
+              agentId: "reviewer-agent",
+            },
+          },
+        },
+        NOW,
+      ),
+    ).toEqual({ stale: false });
+  });
+
   describe.each([
     { name: "resolved connection", isResolvedInteractionContinuation: true, wakeReason: "issue_interaction_resolved" },
     { name: "tool snapshot refresh", isResolvedInteractionContinuation: false, wakeReason: "connection_tools_updated" },

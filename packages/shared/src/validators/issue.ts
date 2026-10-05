@@ -560,6 +560,7 @@ export const executionReconciliationResultSchema = z
       "pending",
       "delegated",
       "delivered",
+      "not_required",
       "invalidated",
     ]),
     replayStarted: z.literal(false),

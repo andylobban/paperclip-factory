@@ -9410,9 +9410,19 @@ export function issueRoutes(
             const persistedReconciliation =
               persistedExecutionReconciliation(settledRecoveryAction);
             if (executionReconciliation && persistedReconciliation) {
+              const persistedSourceIssueStatus =
+                typeof settled.evidence.reconciliationSourceIssueStatus ===
+                "string"
+                  ? settled.evidence.reconciliationSourceIssueStatus
+                  : "todo";
+              const persistedResolutionOutcome =
+                typeof settled.evidence.reconciliationResolutionOutcome ===
+                "string"
+                  ? settled.evidence.reconciliationResolutionOutcome
+                  : "restored";
               if (
-                outcome !== "restored" ||
-                sourceIssueStatus !== "todo" ||
+                outcome !== persistedResolutionOutcome ||
+                sourceIssueStatus !== persistedSourceIssueStatus ||
                 !executionReconciliationMatches(
                   persistedReconciliation,
                   executionReconciliation,
@@ -9444,8 +9454,7 @@ export function issueRoutes(
               assertBoard(req);
               if (
                 activeRecoveryAction ||
-                sourceIssueStatus !== "todo" ||
-                outcome !== "restored"
+                !["restored", "blocked"].includes(outcome)
               ) {
                 throw conflict(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
@@ -9481,7 +9490,7 @@ export function issueRoutes(
         );
 
         if (
-          sourceIssueStatus === "todo" &&
+          executionReconciliation &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoard(req);
@@ -9557,11 +9566,21 @@ export function issueRoutes(
             chatRetry
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
+            { continuationRequired: sourceIssueStatus === "todo" },
           );
+          await tx
+            .update(issueRecoveryActions)
+            .set({
+              evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({
+                reconciliationSourceIssueStatus: sourceIssueStatus,
+                reconciliationResolutionOutcome: outcome,
+              })}::jsonb`,
+            })
+            .where(eq(issueRecoveryActions.id, activeRecoveryAction.id));
         }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
-        if (outcome === "blocked" && sourceStatusChanged) {
+        if (outcome === "blocked") {
           const unresolvedBlockers = await tx
             .select({ id: issueRows.id })
             .from(issueRelations)

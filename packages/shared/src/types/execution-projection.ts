@@ -75,6 +75,7 @@ export type ExecutionReconciliationContinuationDelivery =
   | "pending"
   | "delegated"
   | "delivered"
+  | "not_required"
   | "invalidated";
 
 /** Typed receipt for a stopped-execution decision. The stopped run is never replayed. */

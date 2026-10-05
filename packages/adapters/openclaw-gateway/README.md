@@ -62,12 +62,14 @@ The agent request is built as:
 - `queueTimeoutMs` bounds the wait for the first gateway activity
 - `idleTimeoutMs` bounds inactivity after execution begins
 - `waitPollIntervalMs` controls bounded `agent.wait` polling (default 5 seconds)
+- `cancelSettlementTimeoutMs` bounds the wait for a terminal provider receipt after `sessions.abort` acknowledges the request (default 15 seconds)
 
 An individual `agent.wait` timeout is a poll result, not proof that the remote
 run ended. Paperclip continues polling while gateway activity remains within
 the configured deadlines. When a queue or idle deadline expires, the adapter
 calls `sessions.abort` with `clearQueued=true` and returns
-`openclaw_gateway_wait_timeout` only with the provider acknowledgement attached.
+`openclaw_gateway_wait_timeout` only after the acknowledgement is followed by a
+terminal lifecycle or `agent.wait` receipt for the exact provider run.
 If termination cannot be verified, it returns
 `openclaw_gateway_cancel_unverified` instead of claiming a terminal run.
 

@@ -673,6 +673,90 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     },
   );
 
+  it.each(["in_review", "done"] as const)(
+    "atomically reconciles completed provider work directly to %s without queuing a successor",
+    async (sourceIssueStatus) => {
+      const { sourceIssueId, runId, action } =
+        await seedAutomaticNoReplayHold();
+      const app = createApp();
+      const response = await request(app)
+        .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+        .send({
+          actionId: action.id,
+          outcome: "restored",
+          sourceIssueStatus,
+          executionReconciliation: {
+            runId,
+            providerStopped: true,
+            actionOutcome: "completed",
+            outcomeEvidence:
+              "Terminal provider evidence proves the original execution completed and must not be replayed.",
+          },
+        })
+        .expect(200);
+
+      expect(response.body.issue.status).toBe(sourceIssueStatus);
+      expect(response.body.executionReconciliationResult).toEqual({
+        disposition: "accepted",
+        actionOutcome: "completed",
+        continuationDelivery: "not_required",
+        replayStarted: false,
+      });
+      expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+      const [recorded] = await db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.id, action.id));
+      expect(recorded!.evidence).toMatchObject({
+        continuationDelivery: "not_required",
+        reconciliationSourceIssueStatus: sourceIssueStatus,
+      });
+    },
+  );
+
+  it("atomically reconciles a settled execution to a real blocked dependency without a successor", async () => {
+    const { companyId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    const blockerId = randomUUID();
+    await db.insert(issues).values({
+      id: blockerId,
+      companyId,
+      title: "Obtain the required operator credential",
+      status: "todo",
+      priority: "high",
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: sourceIssueId,
+      type: "blocks",
+    });
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "blocked",
+        sourceIssueStatus: "blocked",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          actionOutcome: "mixed",
+          outcomeEvidence:
+            "Terminal provider evidence proves partial work, while the linked operator task remains unresolved.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.issue.status).toBe("blocked");
+    expect(response.body.executionReconciliationResult).toMatchObject({
+      actionOutcome: "mixed",
+      continuationDelivery: "not_required",
+      replayStarted: false,
+    });
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+  });
+
   it("stands down while the latest run was cancelled by a board operator", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.insert(heartbeatRuns).values({
@@ -1873,6 +1957,63 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(before.action);
     expect(await db.select().from(heartbeatRuns)).toEqual(before.runs);
     expect(await db.select().from(agentWakeupRequests)).toEqual(before.wakes);
+  });
+
+  it("keeps an OpenClaw successor fenced until the exact provider run has a terminal receipt", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    const app = createApp();
+    const body = {
+      actionId: action.id,
+      outcome: "restored",
+      sourceIssueStatus: "todo",
+      executionReconciliation: {
+        runId,
+        providerStopped: true,
+        actionOutcome: "not_performed",
+        outcomeEvidence:
+          "The operator inspected the remote trajectory and is waiting for its authoritative terminal receipt.",
+      },
+    };
+
+    const fenced = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(409);
+    expect(fenced.body.code).toBe("execution_provider_settlement_required");
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("blocked");
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          providerSettlement: {
+            state: "terminal",
+            runId: "openclaw-provider-run-1",
+            terminalStatus: "cancelled",
+            settledAt: "2026-10-05T22:00:00.000Z",
+            source: "agent.wait",
+            receipt: { status: "cancelled" },
+          },
+        },
+      })
+      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
+
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("todo");
   });
 
   it("exposes a resolved no-replay hold through a typed diagnostic without changing active recovery reads", async () => {

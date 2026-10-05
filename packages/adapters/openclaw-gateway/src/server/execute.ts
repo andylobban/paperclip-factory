@@ -100,6 +100,15 @@ type GatewayCancellation = {
   errorMessage?: string;
 };
 
+type GatewayProviderSettlement = {
+  state: "terminal";
+  runId: string;
+  terminalStatus: string;
+  settledAt: string;
+  source: "agent" | "agent.wait" | "lifecycle";
+  receipt: Record<string, unknown> | null;
+};
+
 const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
@@ -594,6 +603,7 @@ export function buildAgentParams(input: {
 function acknowledgedCancellationResult(input: {
   resultJson: Record<string, unknown> | null;
   cancellation: GatewayCancellation;
+  settlement: GatewayProviderSettlement;
   errorCode: string;
   errorMessage: string;
   timedOut: boolean;
@@ -614,6 +624,7 @@ function acknowledgedCancellationResult(input: {
         providerMethod: "sessions.abort",
         providerResult: input.cancellation.payload,
       },
+      providerSettlement: input.settlement,
     },
   };
 }
@@ -640,6 +651,9 @@ function unverifiedCancellationResult(input: {
         requestedAt: new Date().toISOString(),
         providerMethod: "sessions.abort",
         providerResult: input.cancellation.payload,
+        ...(input.cancellation.acknowledged
+          ? { providerAcknowledgedAt: new Date().toISOString() }
+          : {}),
       },
     },
   };
@@ -1215,6 +1229,8 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
     queueTimeoutMs,
     idleTimeoutMs,
   );
+  const cancelSettlementTimeoutMs =
+    parseOptionalPositiveInteger(ctx.config.cancelSettlementTimeoutMs) ?? 15_000;
 
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
@@ -1334,6 +1350,7 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
     let lastRemoteActivityAt: number | null = null;
+    let providerSettlement: GatewayProviderSettlement | null = null;
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
@@ -1390,6 +1407,30 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       if (stream === "lifecycle") {
         const phase = nonEmpty(data.phase)?.toLowerCase();
+        if (
+          phase &&
+          [
+            "end",
+            "ended",
+            "complete",
+            "completed",
+            "done",
+            "error",
+            "failed",
+            "cancelled",
+            "canceled",
+            "aborted",
+          ].includes(phase)
+        ) {
+          providerSettlement = {
+            state: "terminal",
+            runId,
+            terminalStatus: phase,
+            settledAt: new Date().toISOString(),
+            source: "lifecycle",
+            receipt: data,
+          };
+        }
         if (phase === "error" || phase === "failed" || phase === "cancelled") {
           lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
         }
@@ -1409,6 +1450,58 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
       resolveCancellationRequested = resolve;
     });
     const onAbort = () => resolveCancellationRequested();
+
+    const settlementFromWait = (
+      runId: string,
+      payload: Record<string, unknown>,
+      source: GatewayProviderSettlement["source"] = "agent.wait",
+    ): GatewayProviderSettlement | null => {
+      const status = nonEmpty(payload.status)?.toLowerCase();
+      if (
+        !status ||
+        !["ok", "error", "failed", "cancelled", "canceled", "aborted"].includes(
+          status,
+        )
+      )
+        return null;
+      return {
+        state: "terminal",
+        runId,
+        terminalStatus: status,
+        settledAt: new Date().toISOString(),
+        source,
+        receipt: payload,
+      };
+    };
+
+    const waitForProviderSettlement = async (
+      runId: string,
+    ): Promise<GatewayProviderSettlement | null> => {
+      const deadlineAt = Date.now() + cancelSettlementTimeoutMs;
+      while (Date.now() < deadlineAt) {
+        if (providerSettlement?.runId === runId) return providerSettlement;
+        const remainingMs = deadlineAt - Date.now();
+        const pollMs = Math.max(
+          1,
+          Math.min(waitPollIntervalMs, remainingMs),
+        );
+        try {
+          const payload = await client.request<Record<string, unknown>>(
+            "agent.wait",
+            { runId, timeoutMs: pollMs },
+            { timeoutMs: pollMs + Math.min(connectTimeoutMs, 1_000) },
+          );
+          const settlement = settlementFromWait(runId, payload);
+          if (settlement) {
+            providerSettlement = settlement;
+            return settlement;
+          }
+        } catch {
+          if (providerSettlement?.runId === runId) return providerSettlement;
+        }
+      }
+      return providerSettlement?.runId === runId ? providerSettlement : null;
+    };
 
     const cancelRemote = (reason: string): Promise<GatewayCancellation> => {
       if (cancellationPromise) return cancellationPromise;
@@ -1467,15 +1560,21 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
             ? `OpenClaw gateway run did not start within ${queueTimeoutMs}ms`
             : `OpenClaw gateway run produced no activity for ${idleTimeoutMs}ms`;
       const cancellation = await cancelRemote(input.reason);
+      const settlement = cancellation.acknowledged
+        ? await waitForProviderSettlement(
+            acceptedRunIdForCancellation ?? ctx.runId,
+          )
+        : null;
       const common = {
         resultJson: asRecord(input.latestPayload),
         cancellation,
         timedOut,
         errorMessage,
       };
-      return cancellation.acknowledged
+      return cancellation.acknowledged && settlement
         ? acknowledgedCancellationResult({
             ...common,
+            settlement,
             errorCode: timedOut ? "openclaw_gateway_wait_timeout" : "cancelled",
           })
         : unverifiedCancellationResult({
@@ -1626,7 +1725,14 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
           timedOut: false,
           errorMessage,
           errorCode: "openclaw_gateway_agent_error",
-          resultJson: acceptedPayload,
+          resultJson: {
+            ...acceptedPayload,
+            providerSettlement: settlementFromWait(
+              acceptedRunId,
+              acceptedPayload,
+              "agent",
+            ),
+          },
         };
       }
 
@@ -1666,6 +1772,10 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
           const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
           if (waitStatus === "timeout") continue;
           if (waitStatus === "error") {
+            providerSettlement = settlementFromWait(
+              acceptedRunId,
+              waitPayload,
+            );
             return {
               exitCode: 1,
               signal: null,
@@ -1675,7 +1785,10 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
                 lifecycleError ??
                 "OpenClaw gateway run failed",
               errorCode: "openclaw_gateway_wait_error",
-              resultJson: waitPayload,
+              resultJson: {
+                ...waitPayload,
+                ...(providerSettlement ? { providerSettlement } : {}),
+              },
             };
           }
           if (waitStatus && waitStatus !== "ok") {
@@ -1688,6 +1801,7 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
               resultJson: waitPayload,
             };
           }
+          providerSettlement = settlementFromWait(acceptedRunId, waitPayload);
           break;
         }
       }
@@ -1732,7 +1846,21 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(model ? { model } : {}),
         ...(usage ? { usage } : {}),
         ...(costUsd > 0 ? { costUsd } : {}),
-        resultJson: asRecord(latestResultPayload),
+        resultJson: {
+          ...(asRecord(latestResultPayload) ?? {}),
+          ...(providerSettlement
+            ? { providerSettlement }
+            : {
+                providerSettlement: {
+                  state: "terminal",
+                  runId: acceptedRunId,
+                  terminalStatus: "ok",
+                  settledAt: new Date().toISOString(),
+                  source: "agent",
+                  receipt: asRecord(latestResultPayload),
+                } satisfies GatewayProviderSettlement,
+              }),
+        },
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),
       };
