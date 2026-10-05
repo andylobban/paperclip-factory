@@ -1,4 +1,7 @@
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const websocketState = vi.hoisted(() => ({
@@ -8,6 +11,8 @@ const websocketState = vi.hoisted(() => ({
   events: [] as string[],
   messages: [] as string[],
 }));
+
+let credentialRoot: string;
 
 vi.mock("ws", async () => {
   const { EventEmitter } = await import("node:events");
@@ -90,6 +95,7 @@ function createContext(input: {
       url: "ws://127.0.0.1:18789",
       disableDeviceAuth: true,
       timeoutSec: 1,
+      claimedApiKeyPath: path.join(credentialRoot, "claimed.json"),
     },
     context: {
       issueId: "issue-1",
@@ -98,11 +104,13 @@ function createContext(input: {
     },
     onLog: input.onLog ?? (async () => {}),
     onDispatch: input.onDispatch,
+    authToken: "run-secret-token",
   };
 }
 
 describe("openclaw_gateway execute dispatch boundary", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    credentialRoot = await mkdtemp(path.join(tmpdir(), "paperclip-openclaw-run-"));
     websocketState.connectionAttempts = 0;
     websocketState.failConnectAttempts = 0;
     websocketState.failAgentRequests = 0;
@@ -110,8 +118,45 @@ describe("openclaw_gateway execute dispatch boundary", () => {
     websocketState.messages = [];
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
+    await rm(credentialRoot, { recursive: true, force: true });
+  });
+
+  it("fails before gateway dispatch when a task-scoped credential is missing", async () => {
+    const ctx = createContext();
+    delete ctx.authToken;
+    const onDispatch = vi.fn();
+    ctx.onDispatch = onDispatch;
+
+    const result = await execute(ctx);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      errorCode: "openclaw_gateway_task_credential_missing",
+    });
+    expect(websocketState.connectionAttempts).toBe(0);
+    expect(onDispatch).not.toHaveBeenCalled();
+  });
+
+  it("delivers the credential through a run-scoped file without prompt or log exposure", async () => {
+    const logs: string[] = [];
+    const result = await execute(createContext({
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    }));
+
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(websocketState.messages).toHaveLength(1);
+    expect(websocketState.messages[0]).not.toContain("run-secret-token");
+    expect(logs.join("\n")).not.toContain("run-secret-token");
+    const credentialPath = websocketState.messages[0]!.match(
+      /single line in ([^\s]+\.key)/,
+    )?.[1];
+    expect(credentialPath).toBeTruthy();
+    await expect(import("node:fs/promises").then(({ stat }) => stat(credentialPath!)))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each([false, true])("sends conversation policy without the issue-completion workflow (resumed=%s)", async (resumed) => {

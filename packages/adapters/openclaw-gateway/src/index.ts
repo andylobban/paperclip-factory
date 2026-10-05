@@ -39,7 +39,7 @@ Request behavior fields:
 - waitPollIntervalMs (number, optional): bounded agent.wait polling interval used to observe activity and cancellation (default 5000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
-- claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
+- claimedApiKeyPath (string, optional): directory anchor for the run-scoped Paperclip credential file (default ~/.openclaw/workspace/paperclip-claimed-api-key.json). Paperclip writes a sibling 0600 file for the run and removes it when execution settles; the long-lived claimed-key file is not read by the agent.
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run
@@ -48,6 +48,7 @@ Session routing fields:
 Wake payload notes:
 - Paperclip wake context is embedded into the generated message text
 - No top-level paperclip field is sent; the gateway agent schema rejects unknown root params
+- Paperclip task runs fail before Gateway dispatch unless a run-scoped Paperclip JWT can be delivered without placing it in the wake prompt or adapter logs
 
 Standard result metadata supported:
 - meta.runtimeServices (array, optional): normalized adapter-managed runtime service reports

@@ -1758,6 +1758,155 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
   });
 
+  it("starts stage automation from the exact case candidate instead of a reused workspace", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    const routineSeed = await seedRoutine(company.id, "Candidate-bound automation");
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const staleExecutionWorkspaceId = randomUUID();
+    const candidateCommit = "5770d4a6d28aef2c58943180f12c92dc5ffee202";
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId: company.id,
+      name: "Candidate project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId: company.id,
+      projectId,
+      name: "Candidate repository",
+      sourceType: "git_repo",
+      repoUrl: "https://github.com/example/candidate-project",
+      isPrimary: true,
+    });
+    await db.insert(executionWorkspaces).values({
+      id: staleExecutionWorkspaceId,
+      companyId: company.id,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Stale worktree",
+      status: "active",
+      providerType: "git_worktree",
+    });
+
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("in_progress")!.id,
+      patch: {
+        config: {
+          automation: {
+            assigneeAgentId: routineSeed.assigneeAgentId,
+            instructionsBody: "Review the case candidate.",
+            projectId,
+            projectWorkspaceId,
+            executionWorkspaceId: staleExecutionWorkspaceId,
+            executionWorkspacePreference: "reuse_existing",
+            executionWorkspaceSettings: {
+              mode: "isolated_workspace",
+              workspaceStrategy: {
+                type: "git_worktree",
+                baseRef: "origin/main",
+                existingBranch: "stale-review",
+              },
+            },
+          },
+        },
+      },
+      actor: userActor,
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "candidate-context",
+      title: "Candidate context case",
+      workspaceRef: {
+        repository: "https://github.com/example/candidate-project",
+        branch: "feature/candidate",
+        commit: candidateCommit,
+      },
+      actor: userActor,
+    });
+    const moved = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    });
+
+    expect(moved.automationExecution.status).toBe("succeeded");
+    const executionIssueId = moved.automationExecution.status === "succeeded"
+      ? moved.automationExecution.execution.executionIssueId
+      : null;
+    const [issue] = await db
+      .select({
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      })
+      .from(issues)
+      .where(eq(issues.id, executionIssueId!));
+
+    expect(issue).toEqual({
+      executionWorkspaceId: null,
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: candidateCommit,
+        },
+      },
+    });
+  });
+
+  it("fails closed before stage automation when a repository workspaceRef has no candidate ref", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    const routineSeed = await seedRoutine(company.id, "Malformed candidate automation");
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("in_progress")!.id,
+      patch: {
+        config: {
+          automation: {
+            assigneeAgentId: routineSeed.assigneeAgentId,
+            instructionsBody: "This must not launch.",
+          },
+        },
+      },
+      actor: userActor,
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "missing-candidate-ref",
+      title: "Missing candidate ref",
+      workspaceRef: { repository: "https://github.com/example/candidate-project" },
+      actor: userActor,
+    });
+
+    await expect(svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "in_progress",
+      expectedVersion: created.case.version,
+      actor: userActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "pipeline_candidate_ref_missing" },
+    });
+
+    expect(await db.select().from(pipelineAutomationExecutions)).toHaveLength(0);
+    expect(await db.select().from(issues)).toHaveLength(0);
+  });
+
   it("inherits project workspace context from the linked origin issue", async () => {
     const { company, pipeline, byKey } = await seedPipeline();
     const routineSeed = await seedRoutine(company.id, "Origin workspace automation");

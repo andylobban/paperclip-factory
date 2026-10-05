@@ -840,6 +840,77 @@ function readAutomationExecutionContext(
   };
 }
 
+type CaseCandidateBinding = {
+  baseRef: string;
+  repository: string | null;
+};
+
+function readCaseCandidateBinding(workspaceRef: unknown): CaseCandidateBinding | null {
+  if (!workspaceRef || typeof workspaceRef !== "object" || Array.isArray(workspaceRef)) {
+    return null;
+  }
+  const candidate = workspaceRef as Record<string, unknown>;
+  const declaresRepositoryCandidate = ["repository", "commit", "branch", "pullRequest"]
+    .some((key) => readOptionalTrimmedString(candidate[key]) !== null);
+  if (!declaresRepositoryCandidate) return null;
+
+  const baseRef =
+    readOptionalTrimmedString(candidate.commit) ??
+    readOptionalTrimmedString(candidate.branch);
+  if (!baseRef || baseRef.startsWith("-") || /[\r\n\0]/.test(baseRef)) {
+    throw unprocessable(
+      "Pipeline case repository workspaceRef must provide a safe candidate commit or branch",
+      { code: "pipeline_candidate_ref_missing" },
+    );
+  }
+  return {
+    baseRef,
+    repository: readOptionalTrimmedString(candidate.repository),
+  };
+}
+
+function normalizeRepositoryIdentity(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  const scpLike = trimmed.match(/^[^@\s]+@([^:\s]+):(.+)$/);
+  if (scpLike) {
+    return `${scpLike[1]}/${scpLike[2]}`.toLowerCase();
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.hostname}/${parsed.pathname.replace(/^\/+|\/+$/g, "")}`
+      .replace(/\.git$/i, "")
+      .toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function bindExecutionContextToCaseCandidate(
+  context: PipelineAutomationExecutionContext,
+  candidate: CaseCandidateBinding | null,
+): PipelineAutomationExecutionContext {
+  if (!candidate) return context;
+  const priorSettings = context.executionWorkspaceSettings ?? {};
+  const priorStrategy = priorSettings.workspaceStrategy ?? {
+    type: "git_worktree" as const,
+  };
+  const { existingBranch: _existingBranch, ...safePriorStrategy } = priorStrategy;
+  return {
+    ...context,
+    executionWorkspaceId: null,
+    executionWorkspacePreference: "isolated_workspace",
+    executionWorkspaceSettings: {
+      ...priorSettings,
+      mode: "isolated_workspace",
+      workspaceStrategy: {
+        ...safePriorStrategy,
+        type: "git_worktree",
+        baseRef: candidate.baseRef,
+      },
+    },
+  };
+}
+
 function readStageAutomationRequest(config?: PipelineStageConfig | null) {
   const automation = config?.automation;
   if (!automation || typeof automation !== "object" || Array.isArray(automation)) return null;
@@ -2658,6 +2729,16 @@ export function pipelineService(db: Db, deps: {
     caseId: string;
     configured: PipelineAutomationExecutionContext;
   }): Promise<PipelineAutomationExecutionContext> {
+    const caseWorkspaceRef = await db
+      .select({ workspaceRef: pipelineCases.workspaceRef })
+      .from(pipelineCases)
+      .where(and(
+        eq(pipelineCases.companyId, input.companyId),
+        eq(pipelineCases.id, input.caseId),
+      ))
+      .limit(1)
+      .then((rows) => rows[0]?.workspaceRef ?? null);
+    const candidateBinding = readCaseCandidateBinding(caseWorkspaceRef);
     const origin = await db
       .select({
         projectId: issues.projectId,
@@ -2693,7 +2774,29 @@ export function pipelineService(db: Db, deps: {
       projectWorkspaceId = resolved?.projectWorkspaceId ?? null;
     }
 
-    return {
+    if (candidateBinding?.repository && projectWorkspaceId) {
+      const selectedRepository = await db
+        .select({ repoUrl: projectWorkspaces.repoUrl })
+        .from(projectWorkspaces)
+        .where(and(
+          eq(projectWorkspaces.companyId, input.companyId),
+          eq(projectWorkspaces.id, projectWorkspaceId),
+        ))
+        .limit(1)
+        .then((rows) => readOptionalTrimmedString(rows[0]?.repoUrl));
+      if (
+        selectedRepository &&
+        normalizeRepositoryIdentity(selectedRepository) !==
+          normalizeRepositoryIdentity(candidateBinding.repository)
+      ) {
+        throw unprocessable(
+          "Pipeline case candidate repository does not match the selected project workspace",
+          { code: "pipeline_candidate_repository_mismatch" },
+        );
+      }
+    }
+
+    return bindExecutionContextToCaseCandidate({
       projectId,
       projectWorkspaceId,
       executionWorkspaceId: input.configured.executionWorkspaceId
@@ -2706,7 +2809,7 @@ export function pipelineService(db: Db, deps: {
         ?? (inheritsOriginProject
           ? readExecutionWorkspaceSettings(origin?.executionWorkspaceSettings)
           : null),
-    };
+    }, candidateBinding);
   }
 
   async function preflightStageRepository(input: {
