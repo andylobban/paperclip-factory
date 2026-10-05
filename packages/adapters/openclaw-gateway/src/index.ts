@@ -37,6 +37,7 @@ Request behavior fields:
 - queueTimeoutMs (number, optional): maximum time to wait for the first gateway activity (default waitTimeoutMs)
 - idleTimeoutMs (number, optional): maximum time after the latest gateway activity before stopping the remote run (default waitTimeoutMs)
 - waitPollIntervalMs (number, optional): bounded agent.wait polling interval used to observe activity and cancellation (default 5000)
+- cancelSettlementTimeoutMs (number, optional): maximum wait after sessions.abort acknowledgement for an authoritative terminal provider receipt (default 15000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
 - claimedApiKeyPath (string, optional): directory anchor for the run-scoped Paperclip credential file (default ~/.openclaw/workspace/paperclip-claimed-api-key.json). Paperclip writes a sibling 0600 file for the run and removes it when execution settles; the long-lived claimed-key file is not read by the agent.
@@ -57,7 +58,7 @@ Standard result metadata supported:
 
 Cancellation contract:
 - Operator cancellation and queue/idle timeout call sessions.abort with clearQueued=true.
-- Paperclip reports cancellation as acknowledged only after the gateway returns aborted or no-active-run.
+- Paperclip reports cancellation as acknowledged only after the abort response and a terminal lifecycle or agent.wait receipt for the exact provider run.
 - A failed or ambiguous abort is returned as openclaw_gateway_cancel_unverified so the controller cannot mistake a live remote run for a terminal one.
 - New OpenClaw agents default heartbeat.maxConcurrentRuns to 1 because gateway execution lanes are serial; operators may explicitly raise it for a gateway topology that supports parallel runs.
 `;

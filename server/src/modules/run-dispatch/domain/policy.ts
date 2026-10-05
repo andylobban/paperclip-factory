@@ -528,6 +528,12 @@ export function decideQueuedRunStaleness(
       runAgentId: facts.runAgentId,
       issueAssigneeAgentId: facts.issueAssigneeAgentId,
       isNonAssigneeWorkspaceBusyRetry: false,
+      isCurrentReviewParticipant:
+        facts.reviewParticipant.isInReview &&
+        facts.reviewParticipant.participantIsAgent &&
+        facts.reviewParticipant.participantAgentId === facts.runAgentId,
+      isAuthorizedSourceScopedRecovery:
+        facts.isAuthorizedSourceScopedRecovery,
     });
     if (earlyOwnership === "reassigned") {
       return {

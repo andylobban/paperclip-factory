@@ -1623,6 +1623,16 @@ duplicate record into a separate continuation. A continuation remains pending
 until a successor run is durably linked and must not be presented as queued
 before that link exists.
 
+Remote provider settlement is authoritative for gateway-backed execution. A
+control-plane timeout or accepted cancellation request does not establish that
+the provider stopped. Paperclip persists the exact terminal provider receipt,
+keeps successors fenced while that receipt is absent, and requires it before a
+board reconciliation can release an OpenClaw run. A reconciliation may move
+the issue directly to `in_review`, `done`, or a valid `blocked` state without a
+transient `todo` transition or successor dispatch. Queued review work remains
+valid when its agent is still the current review participant, even though the
+executor remains the issue assignee.
+
 ### Managed AI authentication
 
 AI credentials can be adopted into the existing Connections system. A typed

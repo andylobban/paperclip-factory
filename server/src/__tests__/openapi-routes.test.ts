@@ -276,7 +276,13 @@ describe("openapi routes", () => {
       },
       continuationDelivery: {
         type: "string",
-        enum: ["pending", "delegated", "delivered", "invalidated"],
+        enum: [
+          "pending",
+          "delegated",
+          "delivered",
+          "not_required",
+          "invalidated",
+        ],
       },
       replayStarted: { type: "boolean", enum: [false] },
     });
