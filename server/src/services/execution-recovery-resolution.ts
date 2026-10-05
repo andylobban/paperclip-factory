@@ -172,7 +172,7 @@ export async function validateExecutionReconciliation(input: {
     if (
       settlement?.state !== "terminal" ||
       typeof settlement.runId !== "string" ||
-      settlement.runId.length === 0 ||
+      settlement.runId !== run.id ||
       typeof settlement.terminalStatus !== "string" ||
       settlement.terminalStatus.length === 0 ||
       !Number.isFinite(settledAt)

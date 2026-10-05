@@ -1996,6 +1996,13 @@
       "when": 1790407586147,
       "tag": "0286_amused_fabian_cortez",
       "breakpoints": true
+    },
+    {
+      "idx": 287,
+      "version": "7",
+      "when": 1791238800000,
+      "tag": "0287_legacy_openclaw_provider_settlement",
+      "breakpoints": true
     }
   ]
 }
