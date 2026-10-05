@@ -396,6 +396,13 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
           eq(heartbeatRuns.id, claims.run_id), eq(heartbeatRuns.companyId, claims.company_id), eq(heartbeatRuns.agentId, claims.sub),
         ));
+      if (
+        claims.adapter_type === "openclaw_gateway" &&
+        identityRun?.status !== "running"
+      ) {
+        next(unauthorized("OpenClaw run credential is no longer active; obtain a fresh task-scoped credential"));
+        return;
+      }
       if (identityRun?.status === "cancelled" && identityRun.contextSnapshot?.conversationMode === true
         && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
         _res.status(403).json({ error: "This conversation turn was cancelled", code: "conversation_turn_cancelled" });

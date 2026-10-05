@@ -17,6 +17,10 @@ import {
   stringifyPaperclipWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import { WebSocket } from "ws";
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
@@ -351,6 +355,69 @@ export function resolveClaimedApiKeyPath(value: unknown): string {
   return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
 }
 
+type RunCredentialFile = {
+  path: string;
+  cleanup: () => Promise<void>;
+};
+
+function expandHomePath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+  return path.resolve(value);
+}
+
+function safeRunId(value: string): string {
+  return value.replaceAll(/[^A-Za-z0-9._-]/g, "_").slice(0, 96) || "run";
+}
+
+export async function materializeRunCredentialFile(input: {
+  authToken: string;
+  runId: string;
+  claimedApiKeyPath: unknown;
+}): Promise<RunCredentialFile> {
+  const token = nonEmpty(input.authToken);
+  if (!token) throw new Error("Paperclip task credential is empty");
+
+  const claimedPath = expandHomePath(resolveClaimedApiKeyPath(input.claimedApiKeyPath));
+  const credentialDir = path.dirname(claimedPath);
+  await mkdir(credentialDir, { recursive: true, mode: 0o700 });
+  const directoryStat = await lstat(credentialDir);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error("Paperclip task credential directory is not a real directory");
+  }
+
+  const credentialPath = path.join(
+    credentialDir,
+    `.paperclip-run-${safeRunId(input.runId)}.key`,
+  );
+  const flags =
+    fsConstants.O_CREAT |
+    fsConstants.O_EXCL |
+    fsConstants.O_WRONLY |
+    (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await open(credentialPath, flags, 0o600);
+  try {
+    await handle.writeFile(`${token}\n`, { encoding: "utf8" });
+    await handle.sync();
+  } catch (err) {
+    await handle.close().catch(() => {});
+    await unlink(credentialPath).catch(() => {});
+    throw err;
+  }
+  await handle.close();
+
+  return {
+    path: credentialPath,
+    cleanup: async () => {
+      try {
+        await unlink(credentialPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+    },
+  };
+}
+
 function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
   const paperclipEnv: Record<string, string> = {
@@ -411,7 +478,7 @@ function buildWakeText(
       "Paperclip conversation turn for a cloud adapter.",
       "Set these values in your run context:",
       ...envLines,
-      `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token saved after claim-api-key).`,
+      `Load PAPERCLIP_API_KEY by reading the single line in ${claimedApiKeyPath}. This is a run-scoped credential file; do not print or persist its contents.`,
       "Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutation.",
       "Follow the supplied chat mode directive. Keep this conversation available for the next message.",
       structuredWakePrompt,
@@ -426,9 +493,9 @@ function buildWakeText(
     "",
     "Set these values in your run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
+    `PAPERCLIP_API_KEY=<single line read from ${claimedApiKeyPath}>`,
     "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+    `Load PAPERCLIP_API_KEY by reading the single line in ${claimedApiKeyPath}. This is a run-scoped credential file; do not print or persist its contents.`,
     "",
     `api_base=${apiBaseHint}`,
     `task_id=${payload.taskId ?? ""}`,
@@ -1104,7 +1171,7 @@ function extractResultText(value: unknown): string | null {
   return nonEmpty(record.text) ?? nonEmpty(record.summary) ?? null;
 }
 
-export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const urlValue = asString(ctx.config.url, "").trim();
   if (!urlValue) {
     return {
@@ -1752,5 +1819,50 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ctx.signal?.removeEventListener("abort", onAbort);
       client.close();
     }
+  }
+}
+
+export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const wakePayload = buildWakePayload(ctx);
+  const isPaperclipTaskRun = Boolean(wakePayload.taskId ?? wakePayload.issueId);
+  if (!isPaperclipTaskRun) return executeGateway(ctx);
+
+  if (!nonEmpty(ctx.authToken)) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "OpenClaw task run is missing its task-scoped Paperclip credential",
+      errorCode: "openclaw_gateway_task_credential_missing",
+    };
+  }
+
+  let credentialFile: RunCredentialFile;
+  try {
+    credentialFile = await materializeRunCredentialFile({
+      authToken: ctx.authToken!,
+      runId: ctx.runId,
+      claimedApiKeyPath: ctx.config.claimedApiKeyPath,
+    });
+  } catch (err) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `OpenClaw task credential delivery failed: ${err instanceof Error ? err.message : String(err)}`,
+      errorCode: "openclaw_gateway_task_credential_delivery_failed",
+    };
+  }
+
+  try {
+    return await executeGateway({
+      ...ctx,
+      config: {
+        ...ctx.config,
+        claimedApiKeyPath: credentialFile.path,
+      },
+    });
+  } finally {
+    await credentialFile.cleanup();
   }
 }

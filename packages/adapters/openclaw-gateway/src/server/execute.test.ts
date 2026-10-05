@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentParams, resolveClaimedApiKeyPath, resolveSessionKey } from "./execute.js";
+import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  buildAgentParams,
+  materializeRunCredentialFile,
+  resolveClaimedApiKeyPath,
+  resolveSessionKey,
+} from "./execute.js";
 
 describe("resolveSessionKey", () => {
   it("prefixes run-scoped session keys with the configured agent", () => {
@@ -121,5 +130,28 @@ describe("resolveClaimedApiKeyPath", () => {
   it("falls back to the shared default when value is not a string", () => {
     expect(resolveClaimedApiKeyPath(42)).toBe(DEFAULT_PATH);
     expect(resolveClaimedApiKeyPath({})).toBe(DEFAULT_PATH);
+  });
+});
+
+describe("materializeRunCredentialFile", () => {
+  it("creates a private run-scoped credential beside the configured anchor and revokes it on cleanup", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paperclip-openclaw-credential-"));
+    try {
+      const lease = await materializeRunCredentialFile({
+        authToken: "secret-run-token",
+        runId: "run/123",
+        claimedApiKeyPath: path.join(root, "claimed.json"),
+      });
+
+      expect(path.dirname(lease.path)).toBe(root);
+      expect(path.basename(lease.path)).toBe(".paperclip-run-run_123.key");
+      expect(await readFile(lease.path, "utf8")).toBe("secret-run-token\n");
+      expect((await stat(lease.path)).mode & 0o777).toBe(0o600);
+
+      await lease.cleanup();
+      await expect(stat(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

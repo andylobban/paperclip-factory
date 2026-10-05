@@ -1499,6 +1499,24 @@ Optional auth flags (for authenticated mode):
 - `PAPERCLIP_AUTH_HEADER` (for example `Bearer ...`)
 - `PAPERCLIP_COOKIE` (session cookie header value)
 
+### OpenClaw task-run credentials
+
+Issue-backed `openclaw_gateway` runs use the same server-minted, run-bound
+Paperclip JWT as local adapters. Immediately before Gateway dispatch, the
+adapter writes that JWT to a sibling of the configured `claimedApiKeyPath`
+with mode `0600`; only the generated path is included in the wake prompt. The
+file is removed when the adapter settles, and the API rejects the JWT after
+the bound heartbeat run leaves `running`. Missing credentials or an unsafe or
+unwritable handoff directory fail before the Gateway agent request.
+
+Pipeline automation also treats a repository-shaped case `workspaceRef` as
+authoritative candidate provenance. A candidate commit takes precedence over
+its branch, stage tasks receive a fresh isolated git worktree based at that
+ref, and a repository reference without either a commit or branch is rejected
+before an automation issue is created. This prevents review, verification, or
+release recovery from silently falling back to a project workspace's default
+branch.
+
 ## PostHog MCP Live Smoke Test
 
 The PostHog smoke targets an already-running authenticated Paperclip instance.

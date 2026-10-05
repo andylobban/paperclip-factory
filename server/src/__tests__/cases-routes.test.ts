@@ -478,6 +478,52 @@ describeEmbeddedPostgres("cases routes", () => {
     expect(eventRows.filter((event) => event.runId === runId)).toHaveLength(eventRows.length);
   });
 
+  it("revokes an OpenClaw task credential when its heartbeat run is no longer active", async () => {
+    await enableCases();
+    const company = await seedCompany("OCREV");
+    const [agent] = await db.insert(agents).values({
+      companyId: company.id,
+      name: "OpenClaw Cases Agent",
+      role: "engineer",
+      adapterType: "openclaw_gateway",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    }).returning();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: company.id,
+      agentId: agent!.id,
+      status: "running",
+    });
+    const token = createLocalAgentJwt(
+      agent!.id,
+      company.id,
+      "openclaw_gateway",
+      runId,
+    );
+    expect(token).toBeTruthy();
+    const http = request(authenticatedApp());
+
+    await http
+      .get(`/api/companies/${company.id}/cases`)
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId)
+      .expect(200);
+
+    await db.update(heartbeatRuns)
+      .set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const expired = await http
+      .get(`/api/companies/${company.id}/cases`)
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId)
+      .expect(401);
+    expect(expired.body.error).toContain("no longer active");
+  });
+
   it("rejects cross-company agent access across the cases route surface", async () => {
     await enableCases();
     const ownCompany = await seedCompany("OWN");
