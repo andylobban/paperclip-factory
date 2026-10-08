@@ -378,7 +378,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function isManagedShimContents(contents: string): boolean {
+export function isManagedShimContents(contents: string): boolean {
   const lines = contents.split("\n");
   // Accept the original pinned-runtime shim so upgrades can replace it.
   const withRuntimePath = lines.length === 6;
