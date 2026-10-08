@@ -32,14 +32,19 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-async function createApp(db: Db, companyId: string, userId: string) {
+async function createApp(
+  db: Db,
+  companyId: string,
+  userId: string,
+  actorOverride?: express.Request["actor"],
+) {
   process.env.PAPERCLIP_LOG_DIR = "/tmp/paperclip-test-home/logs";
   process.env.PAPERCLIP_IN_WORKTREE = "false";
   const { accessRoutes } = await import("../routes/access.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.actor = {
+    req.actor = actorOverride ?? {
       type: "board",
       userId,
       source: "local_implicit",
@@ -179,6 +184,119 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
       scope: customScope,
       grantedByUserId: owner.principalId,
     });
+  });
+
+  it("lets the board manage explicit grants for an agent membership", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const agent = await db
+      .insert(agents)
+      .values({
+        companyId: company.id,
+        name: "Board steward",
+        role: "worker",
+        adapterType: "process",
+        adapterConfig: {},
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    const membership = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "agent",
+        principalId: agent.id,
+        status: "active",
+        membershipRole: "member",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+    const res = await request(await createApp(db, company.id, owner.principalId))
+      .patch(`/api/companies/${company.id}/members/${membership.id}/permissions`)
+      .send({
+        grants: [
+          { permissionKey: "tasks:assign" },
+          { permissionKey: "tasks:reconcile_execution" },
+        ],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: membership.id,
+      principalType: "agent",
+      principalId: agent.id,
+    });
+    expect(res.body.grants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ permissionKey: "tasks:assign" }),
+        expect.objectContaining({ permissionKey: "tasks:reconcile_execution" }),
+      ]),
+    );
+
+    const grants = await db
+      .select()
+      .from(principalPermissionGrants)
+      .where(
+        and(
+          eq(principalPermissionGrants.companyId, company.id),
+          eq(principalPermissionGrants.principalType, "agent"),
+          eq(principalPermissionGrants.principalId, agent.id),
+        ),
+      );
+    expect(grants.map((grant) => grant.permissionKey).sort()).toEqual([
+      "tasks:assign",
+      "tasks:reconcile_execution",
+    ]);
+    const auditRows = await db
+      .select()
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.action, "company_member.permissions_updated"),
+          eq(activityLog.entityId, membership.id),
+        ),
+      );
+    expect(auditRows).toEqual([
+      expect.objectContaining({
+        companyId: company.id,
+        actorType: "user",
+        actorId: owner.principalId,
+        entityType: "company_membership",
+        entityId: membership.id,
+        details: { grantCount: 2 },
+      }),
+    ]);
+
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: agent.id,
+      permissionKey: "users:manage_permissions",
+      grantedByUserId: owner.principalId,
+    });
+    const denied = await request(
+      await createApp(db, company.id, owner.principalId, {
+        type: "agent",
+        agentId: agent.id,
+        companyId: company.id,
+        source: "agent_key",
+      }),
+    )
+      .patch(`/api/companies/${company.id}/members/${membership.id}/permissions`)
+      .send({ grants: [{ permissionKey: "tasks:assign" }] });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error).toBe("Board access is required to manage agent permissions.");
+    expect(
+      await db
+        .select()
+        .from(activityLog)
+        .where(
+          and(
+            eq(activityLog.action, "company_member.permissions_updated"),
+            eq(activityLog.entityId, membership.id),
+          ),
+        ),
+    ).toHaveLength(1);
   });
 
   it("sweeps personal connection access when the member route suspends a user", async () => {
