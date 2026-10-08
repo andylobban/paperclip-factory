@@ -197,6 +197,7 @@ vi.mock("../services/index.js", () => ({
     syncIssue: async () => undefined,
   }),
   issueService: () => mockIssueService,
+  issueCloseoutService: () => ({}),
   issueThreadInteractionService: () => mockIssueThreadInteractionService,
   issueTreeControlService: () => mockIssueTreeControlService,
   logActivity: mockLogActivity,

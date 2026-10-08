@@ -150,6 +150,7 @@ function registerServiceMocks() {
       listActiveForIssues: vi.fn(async () => new Map()),
     }),
     issueService: () => mockIssueService,
+    issueCloseoutService: () => ({}),
     logActivity: mockLogActivity,
     projectService: () => mockProjectService,
     routineService: () => ({

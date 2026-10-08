@@ -150,6 +150,7 @@ function registerModuleMocks() {
     }),
     issueReferenceService: () => mockIssueReferenceService,
     issueService: () => mockIssueService,
+    issueCloseoutService: () => ({}),
     issueThreadInteractionService: () => mockIssueThreadInteractionService,
     logActivity: mockLogActivity,
     projectService: () => ({}),
