@@ -94,7 +94,8 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         await dialog.getByRole("button", { name: "Record validated evidence" }).click();
         await expect(dialog.getByRole("heading", { name: "Verified: no execution was performed" })).toBeVisible();
         await expect(dialog).toContainText("Stopped run replayNot started");
-        await dialog.getByRole("button", { name: "Close" }).click();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
       } else if (action === "queued_interrupt") {
         const interrupt = page.getByRole("button", { name: "Interrupt", exact: true });
         await expect(interrupt).toBeEnabled();
