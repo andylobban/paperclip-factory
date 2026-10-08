@@ -1224,6 +1224,15 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
   const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
   const queueTimeoutMs = parseOptionalPositiveInteger(ctx.config.queueTimeoutMs) ?? waitTimeoutMs;
   const idleTimeoutMs = parseOptionalPositiveInteger(ctx.config.idleTimeoutMs) ?? waitTimeoutMs;
+  // `agent` is the remote-work boundary, not another connection handshake.
+  // Under gateway backpressure the request can be accepted before its response
+  // is delivered. Give that acknowledgement a bounded share of the queue
+  // budget so we do not tear down the run-scoped credential while the remote
+  // agent is already starting.
+  const agentRequestTimeoutMs = Math.max(
+    connectTimeoutMs,
+    Math.min(queueTimeoutMs, 60_000),
+  );
   const waitPollIntervalMs = Math.min(
     parseOptionalPositiveInteger(ctx.config.waitPollIntervalMs) ?? 5_000,
     queueTimeoutMs,
@@ -1694,7 +1703,7 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedOutcome = await Promise.race([
         client
           .request<Record<string, unknown>>("agent", agentParams, {
-            timeoutMs: connectTimeoutMs,
+            timeoutMs: agentRequestTimeoutMs,
           })
           .then((payload) => ({ kind: "accepted" as const, payload })),
         cancellationRequested.then(() => ({ kind: "cancelled" as const })),
