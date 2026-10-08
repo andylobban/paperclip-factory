@@ -128,6 +128,7 @@ vi.mock("../services/index.js", () => ({
   }),
   issueReferenceService: () => mockIssueReferenceService,
   issueService: () => mockIssueService,
+  issueCloseoutService: () => ({}),
   logActivity: mockLogActivity,
   projectService: () => mockProjectService,
   routineService: () => mockRoutineService,

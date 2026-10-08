@@ -45,7 +45,8 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
       });
       await db.insert(issueRecoveryActions).values({ companyId: company.id, sourceIssueId: issue.id,
         kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation", fingerprint: sourceRunId,
-        status: "resolved", outcome: "blocked", nextAction: "Automatic recovery stopped.",
+        status: "resolved", outcome: "blocked", returnOwnerAgentId: agent.id,
+        nextAction: "Automatic recovery stopped.",
         evidence: { runId: sourceRunId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
       });
       await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issue.id));
@@ -73,7 +74,8 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
       await page.goto(action === "inbox_retry" ? `/${company.issuePrefix}/inbox/all` : taskUrl);
       if (action === "task_retry") {
         const notice = page.getByRole("status", { name: "Task recovery" });
-        await expect(notice).toHaveText("Automatic recovery of this task stopped.Retry");
+        await expect(notice).toContainText("Execution stopped — reconciliation required");
+        await expect(notice).toContainText("This work cannot be retried or replayed.");
         await expect(notice.getByRole("link")).toHaveCount(0);
         const presentation = await notice.evaluate(element => {
           const style = getComputedStyle(element);
@@ -82,8 +84,20 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         expect(parseFloat(presentation.border)).toBeGreaterThan(0);
         expect(presentation.background).not.toBe("rgba(0, 0, 0, 0)");
         await test.info().attach("recovery-notice", { body: await notice.screenshot(), contentType: "image/png" });
-      }
-      if (action === "queued_interrupt") {
+        await notice.getByRole("button", { name: "Inspect & reconcile" }).click();
+        const dialog = page.getByRole("dialog");
+        await expect(dialog.getByLabel("Stopped run ID")).toHaveValue(sourceRunId);
+        await dialog.getByLabel("I confirm the provider stopped this run.").check();
+        await dialog.getByLabel("Not performed").check();
+        await dialog.getByLabel("Evidence for the outcome").fill(
+          "The legacy fixture has no adapter invocation or provider-side action record.",
+        );
+        await dialog.getByRole("button", { name: "Record validated evidence" }).click();
+        await expect(dialog.getByRole("heading", { name: "Verified: no execution was performed" })).toBeVisible();
+        await expect(dialog).toContainText("Stopped run replayNot started");
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+      } else if (action === "queued_interrupt") {
         const interrupt = page.getByRole("button", { name: "Interrupt", exact: true });
         await expect(interrupt).toBeEnabled();
         await db.update(heartbeatRuns).set({ processPid: 999999999 }).where(eq(heartbeatRuns.id, sourceRunId));

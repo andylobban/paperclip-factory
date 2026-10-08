@@ -1,5 +1,11 @@
 # @paperclipai/shared
 
+## Unreleased
+
+### Patch Changes
+
+- Add a scoped task execution-reconciliation permission for agent grants.
+
 ## 0.3.1
 
 ### Patch Changes

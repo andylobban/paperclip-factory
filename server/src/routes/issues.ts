@@ -6722,6 +6722,33 @@ export function issueRoutes(
     });
   }
 
+  async function assertExecutionReconciliationAuthority(
+    req: Request,
+    issue: { companyId: string },
+  ) {
+    if (req.actor.type === "board") return;
+    if (
+      req.actor.type === "agent" &&
+      req.actor.agentId &&
+      req.actor.runId &&
+      (await access.hasPermission(
+        issue.companyId,
+        "agent",
+        req.actor.agentId,
+        "tasks:reconcile_execution",
+      ))
+    ) {
+      return;
+    }
+    throw forbidden(
+      "Execution reconciliation requires board access or explicit tasks:reconcile_execution permission",
+      {
+        code: "execution_reconciliation_permission_required",
+        permissionKey: "tasks:reconcile_execution",
+      },
+    );
+  }
+
   function activeExecutionParticipantAgentId(issue: {
     executionState?: unknown;
   }) {
@@ -9359,6 +9386,9 @@ export function issueRoutes(
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
+      if (executionReconciliation) {
+        await assertExecutionReconciliationAuthority(req, existing);
+      }
 
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
@@ -9451,7 +9481,6 @@ export function issueRoutes(
             if (automatic?.replay === "blocked" && executionReconciliation) {
               // An automatic no-replay disposition is final until new evidence
               // arrives. Keep the supported evidence API usable without a dialog.
-              assertBoard(req);
               if (
                 activeRecoveryAction ||
                 !["restored", "blocked"].includes(outcome)
@@ -9493,7 +9522,6 @@ export function issueRoutes(
           executionReconciliation &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
-          assertBoard(req);
           await validateExecutionReconciliation({
             db: tx as unknown as Db,
             companyId: lockedIssue.companyId,

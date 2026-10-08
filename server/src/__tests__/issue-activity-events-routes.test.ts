@@ -129,6 +129,7 @@ function registerModuleMocks() {
       expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
     }),
     issueService: () => mockIssueService,
+    issueCloseoutService: () => ({}),
     logActivity: mockLogActivity,
     projectService: () => ({}),
     routineService: () => mockRoutineService,

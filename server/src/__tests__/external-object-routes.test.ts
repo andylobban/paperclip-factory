@@ -73,6 +73,7 @@ function registerRouteMocks() {
       listIssueReferenceSummary: async () => ({ outbound: [], inbound: [] }),
     }),
     issueService: () => mockIssueService,
+    issueCloseoutService: () => ({}),
     issueThreadInteractionService: () => ({}),
     logActivity: vi.fn(async () => undefined),
     projectService: () => ({}),

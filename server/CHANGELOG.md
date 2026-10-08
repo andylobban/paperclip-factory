@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Allow an explicitly granted, run-scoped agent to reconcile a settled execution while preserving issue access, ownership, trust, provider-settlement, conflict, and audit checks.
 - Bound full-tree workspace Git scans with process-wide concurrency, queue, timeout, cancellation, coalescing, and short-lived changed-file caching. Saturated or timed-out changed-file requests now return a retryable degraded response, and hidden file-browser panels no longer initiate scans.
 
 ## 0.3.1

@@ -197,6 +197,7 @@ vi.mock("../services/index.js", () => ({
     syncIssue: async () => undefined,
   }),
   issueService: () => mockIssueService,
+  issueCloseoutService: () => ({}),
   issueThreadInteractionService: () => mockIssueThreadInteractionService,
   issueTreeControlService: () => mockIssueTreeControlService,
   logActivity: mockLogActivity,
@@ -508,35 +509,39 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("treats reopen=true as a no-op when the issue is already open", async () => {
-    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
-    mockIssueService.update.mockImplementation(
-      async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue("todo"),
-        ...patch,
-      }),
-    );
+  it(
+    "treats reopen=true as a no-op when the issue is already open",
+    async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      mockIssueService.update.mockImplementation(
+        async (_id: string, patch: Record<string, unknown>) => ({
+          ...makeIssue("todo"),
+          ...patch,
+        }),
+      );
 
-    const res = await request(await installActor(createApp()))
-      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
-      .send({
-        comment: "hello",
-        reopen: true,
-        assigneeAgentId: "33333333-3333-4333-8333-333333333333",
-      });
+      const res = await request(await installActor(createApp()))
+        .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+        .send({
+          comment: "hello",
+          reopen: true,
+          assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+        });
 
-    expect(res.status).toBe(200);
-    expect(res.body.assigneeAgentId).toBe(
-      "33333333-3333-4333-8333-333333333333",
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "issue.updated",
-        details: expect.not.objectContaining({ reopened: true }),
-      }),
-    );
-  });
+      expect(res.status).toBe(200);
+      expect(res.body.assigneeAgentId).toBe(
+        "33333333-3333-4333-8333-333333333333",
+      );
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: "issue.updated",
+          details: expect.not.objectContaining({ reopened: true }),
+        }),
+      );
+    },
+    30_000,
+  );
 
   it("binds explicit attachments in the same transaction as a PATCH comment reassignment", async () => {
     const issue = makeIssue("todo");

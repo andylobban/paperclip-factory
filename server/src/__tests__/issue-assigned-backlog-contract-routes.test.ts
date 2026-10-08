@@ -101,6 +101,7 @@ vi.mock("../services/index.js", () => ({
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   }),
   issueService: () => mockIssueService,
+  issueCloseoutService: () => ({}),
   logActivity: mockLogActivity,
   projectService: () => ({
     getById: vi.fn(async () => null),

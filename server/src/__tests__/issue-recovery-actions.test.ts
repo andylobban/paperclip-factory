@@ -10,6 +10,7 @@ import {
   agentWakeupRequests,
   activityLog,
   companies,
+  companyMemberships,
   createDb,
   environmentLeases,
   environments,
@@ -19,6 +20,7 @@ import {
   issueRecoveryActions,
   issueRelations,
   issues,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -144,6 +146,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   }, 30_000);
 
   afterEach(async () => {
+    await db.delete(principalPermissionGrants);
+    await db.delete(companyMemberships);
     await db.delete(issueRecoveryActions);
     await db.delete(issueComments);
     await db.delete(environmentLeases);
@@ -230,6 +234,66 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       startedAt: new Date("2026-05-13T18:00:00.000Z"),
       contextSnapshot: input.issueId ? { issueId: input.issueId } : undefined,
     });
+  }
+
+  async function seedReconciliationSteward(input: {
+    companyId: string;
+    grantPermission: boolean;
+  }) {
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId: input.companyId,
+      name: "Board Steward",
+      role: "ceo",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(companyMemberships).values({
+      companyId: input.companyId,
+      principalType: "agent",
+      principalId: agentId,
+      status: "active",
+      membershipRole: "member",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: input.companyId,
+      title: "Sweep the company board",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+    });
+    await seedHeartbeatRun({
+      companyId: input.companyId,
+      agentId,
+      runId,
+      issueId,
+    });
+    if (input.grantPermission) {
+      await db.insert(principalPermissionGrants).values({
+        companyId: input.companyId,
+        principalType: "agent",
+        principalId: agentId,
+        permissionKey: "tasks:reconcile_execution",
+      });
+    }
+    return {
+      agentId,
+      runId,
+      actor: {
+        type: "agent",
+        source: "agent_key",
+        companyId: input.companyId,
+        agentId,
+        runId,
+      },
+    };
   }
 
   function createApp(
@@ -672,6 +736,73 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       expect(enqueueWakeup).not.toHaveBeenCalled();
     },
   );
+
+  it("denies run-scoped agents that lack explicit execution-reconciliation authority", async () => {
+    const { companyId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    const steward = await seedReconciliationSteward({
+      companyId,
+      grantPermission: false,
+    });
+
+    const response = await request(createApp(steward.actor))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "Exact provider evidence proves the action was never admitted and no durable side effect exists.",
+        },
+      })
+      .expect(403);
+
+    expect(response.body).toMatchObject({
+      code: "execution_reconciliation_permission_required",
+      details: { permissionKey: "tasks:reconcile_execution" },
+    });
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("blocked");
+  });
+
+  it("lets an explicitly granted run-scoped steward submit validated execution reconciliation", async () => {
+    const { companyId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    const steward = await seedReconciliationSteward({
+      companyId,
+      grantPermission: true,
+    });
+
+    const response = await request(createApp(steward.actor))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "Exact provider evidence proves the action was never admitted and no durable side effect exists.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.executionReconciliationResult).toMatchObject({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      continuationDelivery: "pending",
+      replayStarted: false,
+    });
+    expect(response.body.issue.status).toBe("todo");
+  });
 
   it.each(["in_review", "done"] as const)(
     "atomically reconciles completed provider work directly to %s without queuing a successor",

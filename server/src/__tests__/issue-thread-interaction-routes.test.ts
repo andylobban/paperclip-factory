@@ -222,6 +222,7 @@ function registerModuleMocks() {
       listActiveForIssues: vi.fn(async () => new Map()),
     }),
     issueService: () => mockIssueService,
+    issueCloseoutService: () => ({}),
     issueThreadInteractionService: () => mockInteractionService,
     taskWatchdogService: () => ({
       getActiveForIssue: vi.fn(async () => null),
