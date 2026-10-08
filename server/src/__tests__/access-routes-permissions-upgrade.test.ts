@@ -32,14 +32,19 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-async function createApp(db: Db, companyId: string, userId: string) {
+async function createApp(
+  db: Db,
+  companyId: string,
+  userId: string,
+  actorOverride?: express.Request["actor"],
+) {
   process.env.PAPERCLIP_LOG_DIR = "/tmp/paperclip-test-home/logs";
   process.env.PAPERCLIP_IN_WORKTREE = "false";
   const { accessRoutes } = await import("../routes/access.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.actor = {
+    req.actor = actorOverride ?? {
       type: "board",
       userId,
       source: "local_implicit",
@@ -242,6 +247,26 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
       "tasks:assign",
       "tasks:reconcile_execution",
     ]);
+
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: agent.id,
+      permissionKey: "users:manage_permissions",
+      grantedByUserId: owner.principalId,
+    });
+    const denied = await request(
+      await createApp(db, company.id, owner.principalId, {
+        type: "agent",
+        agentId: agent.id,
+        companyId: company.id,
+        source: "agent_key",
+      }),
+    )
+      .patch(`/api/companies/${company.id}/members/${membership.id}/permissions`)
+      .send({ grants: [{ permissionKey: "tasks:assign" }] });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error).toBe("Board access is required to manage agent permissions.");
   });
 
   it("sweeps personal connection access when the member route suspends a user", async () => {
