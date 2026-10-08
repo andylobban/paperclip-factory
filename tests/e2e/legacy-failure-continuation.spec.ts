@@ -85,7 +85,7 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         await test.info().attach("recovery-notice", { body: await notice.screenshot(), contentType: "image/png" });
         await notice.getByRole("button", { name: "Inspect & reconcile" }).click();
         const dialog = page.getByRole("dialog");
-        await expect(dialog).toContainText(sourceRunId);
+        await expect(dialog.getByLabel("Stopped run ID")).toHaveValue(sourceRunId);
         await dialog.getByLabel("I confirm the provider stopped this run.").check();
         await dialog.getByLabel("Not performed").check();
         await dialog.getByLabel("Evidence for the outcome").fill(
