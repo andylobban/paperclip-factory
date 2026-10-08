@@ -181,6 +181,69 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     });
   });
 
+  it("lets the board manage explicit grants for an agent membership", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const agent = await db
+      .insert(agents)
+      .values({
+        companyId: company.id,
+        name: "Board steward",
+        role: "worker",
+        adapterType: "process",
+        adapterConfig: {},
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    const membership = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "agent",
+        principalId: agent.id,
+        status: "active",
+        membershipRole: "member",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+    const res = await request(await createApp(db, company.id, owner.principalId))
+      .patch(`/api/companies/${company.id}/members/${membership.id}/permissions`)
+      .send({
+        grants: [
+          { permissionKey: "tasks:assign" },
+          { permissionKey: "tasks:reconcile_execution" },
+        ],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: membership.id,
+      principalType: "agent",
+      principalId: agent.id,
+    });
+    expect(res.body.grants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ permissionKey: "tasks:assign" }),
+        expect.objectContaining({ permissionKey: "tasks:reconcile_execution" }),
+      ]),
+    );
+
+    const grants = await db
+      .select()
+      .from(principalPermissionGrants)
+      .where(
+        and(
+          eq(principalPermissionGrants.companyId, company.id),
+          eq(principalPermissionGrants.principalType, "agent"),
+          eq(principalPermissionGrants.principalId, agent.id),
+        ),
+      );
+    expect(grants.map((grant) => grant.permissionKey).sort()).toEqual([
+      "tasks:assign",
+      "tasks:reconcile_execution",
+    ]);
+  });
+
   it("sweeps personal connection access when the member route suspends a user", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
     const member = await db.insert(companyMemberships).values({
