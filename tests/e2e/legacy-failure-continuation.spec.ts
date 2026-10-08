@@ -45,7 +45,8 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
       });
       await db.insert(issueRecoveryActions).values({ companyId: company.id, sourceIssueId: issue.id,
         kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation", fingerprint: sourceRunId,
-        status: "resolved", outcome: "blocked", nextAction: "Automatic recovery stopped.",
+        status: "resolved", outcome: "blocked", returnOwnerAgentId: agent.id,
+        nextAction: "Automatic recovery stopped.",
         evidence: { runId: sourceRunId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
       });
       await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issue.id));
