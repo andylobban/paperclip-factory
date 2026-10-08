@@ -2006,6 +2006,28 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       })
       .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
 
+    const mismatched = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(409);
+    expect(mismatched.body.code).toBe("execution_provider_settlement_required");
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          providerSettlement: {
+            state: "terminal",
+            runId,
+            terminalStatus: "cancelled",
+            settledAt: "2026-10-05T22:00:00.000Z",
+            source: "agent.wait",
+            receipt: { status: "cancelled" },
+          },
+        },
+      })
+      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
+
     await request(app)
       .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send(body)
