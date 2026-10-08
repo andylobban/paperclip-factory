@@ -247,6 +247,25 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
       "tasks:assign",
       "tasks:reconcile_execution",
     ]);
+    const auditRows = await db
+      .select()
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.action, "company_member.permissions_updated"),
+          eq(activityLog.entityId, membership.id),
+        ),
+      );
+    expect(auditRows).toEqual([
+      expect.objectContaining({
+        companyId: company.id,
+        actorType: "user",
+        actorId: owner.principalId,
+        entityType: "company_membership",
+        entityId: membership.id,
+        details: { grantCount: 2 },
+      }),
+    ]);
 
     await db.insert(principalPermissionGrants).values({
       companyId: company.id,
@@ -267,6 +286,17 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
       .send({ grants: [{ permissionKey: "tasks:assign" }] });
     expect(denied.status, JSON.stringify(denied.body)).toBe(403);
     expect(denied.body.error).toBe("Board access is required to manage agent permissions.");
+    expect(
+      await db
+        .select()
+        .from(activityLog)
+        .where(
+          and(
+            eq(activityLog.action, "company_member.permissions_updated"),
+            eq(activityLog.entityId, membership.id),
+          ),
+        ),
+    ).toHaveLength(1);
   });
 
   it("sweeps personal connection access when the member route suspends a user", async () => {
