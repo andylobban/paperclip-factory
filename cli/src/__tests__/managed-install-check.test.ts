@@ -85,4 +85,56 @@ describe("managed install doctor checks", () => {
       expect.objectContaining({ name: "Managed install", status: "pass" }),
     ]);
   });
+
+  it("ignores a non-managed command symlink at the managed shim path", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-install-doctor-"));
+    const paths = resolveInstallStorePaths({
+      paperclipHome: path.join(root, ".paperclip"),
+      homeDir: root,
+    });
+    const standaloneCli = path.join(root, "standalone-paperclipai");
+    fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+    fs.writeFileSync(
+      standaloneCli,
+      `#!/usr/bin/env node\nconst marker = ${JSON.stringify("paperclipai managed install shim v1")};\n`,
+    );
+    fs.symlinkSync(standaloneCli, paths.shimPath);
+
+    expect(managedInstallChecks(paths)).toEqual([
+      expect.objectContaining({ name: "Managed install", status: "pass" }),
+    ]);
+  });
+
+  it("rejects a command symlink when a managed store is present", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-install-doctor-"));
+    const paths = resolveInstallStorePaths({
+      paperclipHome: path.join(root, ".paperclip"),
+      homeDir: root,
+    });
+    const payloadPath = path.join(paths.installsRoot, "npm", "1.2.3");
+    fs.mkdirSync(path.join(payloadPath, "dist"), { recursive: true });
+    const manifest = buildNextManifest(
+      {
+        source: "npm",
+        version: "1.2.3",
+        channel: "latest",
+        payloadPath,
+        installedAt: "2026-07-22T00:00:00.000Z",
+      },
+      null,
+    );
+    flipCurrentAtomic(payloadPath, paths);
+    writeInstallManifestAtomic(manifest, paths);
+    const standaloneCli = path.join(root, "standalone-paperclipai");
+    fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+    fs.writeFileSync(
+      standaloneCli,
+      `#!/usr/bin/env node\nconst marker = ${JSON.stringify("paperclipai managed install shim v1")};\n`,
+    );
+    fs.symlinkSync(standaloneCli, paths.shimPath);
+
+    expect(managedInstallChecks(paths)).toContainEqual(
+      expect.objectContaining({ name: "Managed install shim", status: "fail" }),
+    );
+  });
 });

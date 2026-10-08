@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
-  MANAGED_SHIM_MARKER,
+  isManagedShimContents,
   readInstallManifest,
   resolveInstallStorePaths,
   type InstallStorePaths,
@@ -22,9 +22,20 @@ function hasManagedArtifacts(paths: InstallStorePaths): boolean {
     paths.manifestPath,
     paths.markerPath,
     paths.currentPath,
-    paths.shimPath,
   ].some((entry) => fs.existsSync(entry));
   if (persistentArtifacts) return true;
+  try {
+    const shimStat = fs.lstatSync(paths.shimPath);
+    if (
+      shimStat.isFile() &&
+      !shimStat.isSymbolicLink() &&
+      isManagedShimContents(fs.readFileSync(paths.shimPath, "utf8"))
+    ) {
+      return true;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+  }
   try {
     return fs.readdirSync(paths.installsRoot).length > 0;
   } catch (error) {
@@ -114,7 +125,11 @@ export function managedInstallChecks(
 
   let shimValid = false;
   try {
-    shimValid = fs.readFileSync(paths.shimPath, "utf8").includes(MANAGED_SHIM_MARKER);
+    const shimStat = fs.lstatSync(paths.shimPath);
+    shimValid =
+      shimStat.isFile() &&
+      !shimStat.isSymbolicLink() &&
+      isManagedShimContents(fs.readFileSync(paths.shimPath, "utf8"));
   } catch {
     shimValid = false;
   }
