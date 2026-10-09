@@ -580,6 +580,9 @@ export const resolveIssueRecoveryActionSchema = z
       .object({
         runId: z.string().guid(),
         providerStopped: z.literal(true),
+        providerAdmission: z
+          .enum(["terminal_receipt", "verified_not_admitted"])
+          .optional(),
         actionOutcome: z.enum(["completed", "not_performed", "mixed"]),
         outcomeEvidence: z.string().trim().min(20).max(12000),
       })

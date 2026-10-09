@@ -5,6 +5,7 @@
 ### Patch Changes
 
 - Preserve one authoritative `agent.wait` request until OpenClaw supplies a terminal receipt, while continuing to enforce Paperclip's local idle and cancellation deadlines.
+- Require host-local credential use in OpenClaw wake instructions so remote execution-tool secret boundaries cannot corrupt the run-scoped Paperclip bearer.
 
 ## 0.3.1
 

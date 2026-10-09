@@ -151,6 +151,7 @@ interface IssueRecoveryResolveOptions extends BaseClientOptions {
   resolutionNote?: string;
   executionRunId?: string;
   providerStopped?: boolean;
+  providerAdmission?: string;
   actionOutcome?: string;
   outcomeEvidence?: string;
 }
@@ -535,6 +536,7 @@ export function registerIssueCommands(program: Command): void {
       .option("--resolution-note <text>", "Resolution note")
       .option("--execution-run-id <id>", "Stopped provider run ID for execution reconciliation")
       .option("--provider-stopped", "Confirm that the provider process has stopped")
+      .option("--provider-admission <mode>", "terminal_receipt or verified_not_admitted")
       .option("--action-outcome <outcome>", "completed, not_performed, or mixed")
       .option("--outcome-evidence <text>", "Evidence supporting the recorded action outcome")
       .action(async (issueId: string, opts: IssueRecoveryResolveOptions) => {
@@ -545,10 +547,11 @@ export function registerIssueCommands(program: Command): void {
             outcome: opts.outcome,
             sourceIssueStatus: opts.sourceIssueStatus,
             resolutionNote: opts.resolutionNote,
-            ...(opts.executionRunId || opts.providerStopped || opts.actionOutcome || opts.outcomeEvidence
+            ...(opts.executionRunId || opts.providerStopped || opts.providerAdmission || opts.actionOutcome || opts.outcomeEvidence
               ? { executionReconciliation: {
                 runId: opts.executionRunId,
                 providerStopped: opts.providerStopped,
+                providerAdmission: opts.providerAdmission,
                 actionOutcome: opts.actionOutcome,
                 outcomeEvidence: opts.outcomeEvidence,
               } }

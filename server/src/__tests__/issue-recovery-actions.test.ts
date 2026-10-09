@@ -2169,6 +2169,108 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     ).toBe("todo");
   });
 
+  it("accepts an authorised verified non-admission when the stopped OpenClaw run cannot produce a receipt", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          stopReason: "timeout",
+          timeoutFired: true,
+          timeoutSource: "default",
+          timeoutConfigured: true,
+        },
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const app = createApp();
+    const response = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The authorised provider audit found zero admission events and zero external actions for this exact run.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.executionReconciliationResult).toMatchObject({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      replayStarted: false,
+    });
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("todo");
+  });
+
+  it("rejects verified non-admission when the stopped OpenClaw run has useful activity", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: { stopReason: "timeout", timeoutFired: true },
+        lastUsefulActionAt: new Date("2026-10-05T22:00:00.000Z"),
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const app = createApp();
+    const response = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The operator claimed the provider was never admitted despite recorded useful activity.",
+        },
+      })
+      .expect(409);
+
+    expect(response.body.code).toBe(
+      "execution_provider_non_admission_unverified",
+    );
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("blocked");
+  });
+
   it("exposes a resolved no-replay hold through a typed diagnostic without changing active recovery reads", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();

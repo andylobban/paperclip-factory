@@ -147,6 +147,7 @@ describe("issue subresource commands", () => {
       "--action-id", APPROVAL_ID,
       "--execution-run-id", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       "--provider-stopped",
+      "--provider-admission", "verified_not_admitted",
       "--action-outcome", "not_performed",
       "--outcome-evidence", "Provider log confirms no action was submitted before the stop.",
     ]);
@@ -154,6 +155,7 @@ describe("issue subresource commands", () => {
       executionReconciliation: {
         runId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         providerStopped: true,
+        providerAdmission: "verified_not_admitted",
         actionOutcome: "not_performed",
       },
     });

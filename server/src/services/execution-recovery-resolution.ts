@@ -65,6 +65,9 @@ export function persistedExecutionReconciliation(
   return {
     runId: record.runId,
     providerStopped: true,
+    ...(record.providerAdmission === "verified_not_admitted"
+      ? { providerAdmission: "verified_not_admitted" as const }
+      : {}),
     actionOutcome:
       record.actionOutcome as ExecutionReconciliation["actionOutcome"],
     outcomeEvidence: record.outcomeEvidence,
@@ -78,6 +81,8 @@ export function executionReconciliationMatches(
   return (
     persisted.runId === submitted.runId &&
     persisted.providerStopped === submitted.providerStopped &&
+    (persisted.providerAdmission ?? "terminal_receipt") ===
+      (submitted.providerAdmission ?? "terminal_receipt") &&
     persisted.actionOutcome === submitted.actionOutcome &&
     persisted.outcomeEvidence === submitted.outcomeEvidence
   );
@@ -163,20 +168,38 @@ export async function validateExecutionReconciliation(input: {
       and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)),
     );
   if (runAgent?.adapterType === "openclaw_gateway") {
+    const providerAdmission =
+      decision.providerAdmission ?? "terminal_receipt";
     const settlement =
       run.resultJson?.providerSettlement as Record<string, unknown> | undefined;
     const settledAt =
       typeof settlement?.settledAt === "string"
         ? Date.parse(settlement.settledAt)
         : Number.NaN;
-    if (
+    const missingTerminalReceipt =
       settlement?.state !== "terminal" ||
       typeof settlement.runId !== "string" ||
       settlement.runId !== run.id ||
       typeof settlement.terminalStatus !== "string" ||
       settlement.terminalStatus.length === 0 ||
-      !Number.isFinite(settledAt)
-    ) {
+      !Number.isFinite(settledAt);
+    if (providerAdmission === "verified_not_admitted") {
+      const runProvesNoAdmission =
+        decision.actionOutcome === "not_performed" &&
+        !run.lastUsefulActionAt &&
+        !run.usageJson &&
+        !settlement &&
+        run.resultJson?.timeoutFired === true &&
+        ["timeout", "cancelled", "failed"].includes(
+          String(run.resultJson?.stopReason ?? ""),
+        );
+      if (!runProvesNoAdmission) {
+        throw conflict(
+          "Verified non-admission is only valid for a stopped OpenClaw run with no useful action, usage, or provider receipt and a not_performed outcome.",
+          { code: "execution_provider_non_admission_unverified", runId: run.id },
+        );
+      }
+    } else if (missingTerminalReceipt) {
       throw conflict(
         "The OpenClaw provider has not supplied an authoritative terminal receipt. Keep this execution fenced until its exact provider run settles.",
         { code: "execution_provider_settlement_required", runId: run.id },
