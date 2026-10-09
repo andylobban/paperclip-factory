@@ -617,6 +617,21 @@ describe("openclaw gateway adapter execute", () => {
       expect(String(payload?.message ?? "")).toContain(
         "Never use PAPERCLIP_API_KEY=$(...) curl",
       );
+      expect(String(payload?.message ?? "")).toContain(
+        "GET /api/issues/{issueId}/recovery-actions/diagnostic",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "POST /api/issues/{issueId}/recovery-actions/resolve",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "GET /api/issues/{issueId}/interactions",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "GET /api/heartbeat-runs/{runId}",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "POST /api/agents/{agentId}/wakeup",
+      );
       expect(String(payload?.message ?? "")).toContain("## Paperclip Wake Payload");
       expect(String(payload?.message ?? "")).toContain(
         "Use this wake to continue the task, applying new user direction and preserving its approval gates.",
