@@ -2339,6 +2339,66 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it("records a board reconciliation without dispatching successor work", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "cancelled",
+        startedAt: null,
+        errorCode: "issue_continuation_waiting_on_review",
+        error: "Cancelled before execution because reviewer feedback is pending",
+        resultJson: {
+          stopReason: "issue_continuation_waiting_on_review",
+          timeoutFired: false,
+          timeoutSource: "stale_queued_run_gate",
+        },
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        continuationPolicy: "manual",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The deterministic queued-review gate proves that no provider execution or external action began.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.executionReconciliationResult).toEqual({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      continuationDelivery: "not_required",
+      replayStarted: false,
+    });
+
+    const wake = vi.fn();
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+  });
+
   it("rejects verified non-admission when the stopped OpenClaw run has useful activity", async () => {
     const { companyId, coderId, sourceIssueId, runId, action } =
       await seedAutomaticNoReplayHold();

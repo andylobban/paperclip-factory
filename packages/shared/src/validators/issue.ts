@@ -591,10 +591,20 @@ export const resolveIssueRecoveryActionSchema = z
     actionId: z.string().guid().optional(),
     outcome: z.enum(RESOLVE_ISSUE_RECOVERY_ACTION_OUTCOMES),
     sourceIssueStatus: z.enum(["todo", "done", "in_review", "blocked"]),
+    continuationPolicy: z.enum(["automatic", "manual"]).default("automatic"),
     resolutionNote: multilineTextSchema.optional().nullable(),
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.continuationPolicy === "manual" && !value.executionReconciliation) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Manual continuation policy requires an execution reconciliation decision",
+        path: ["continuationPolicy"],
+      });
+    }
+
     if (value.outcome === "restored") {
       if (
         value.sourceIssueStatus !== "todo" &&

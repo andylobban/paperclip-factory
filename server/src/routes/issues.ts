@@ -9380,6 +9380,7 @@ export function issueRoutes(
         actionId,
         outcome,
         sourceIssueStatus,
+        continuationPolicy,
         resolutionNote,
         executionReconciliation,
       } = req.body;
@@ -9389,6 +9390,12 @@ export function issueRoutes(
       if (executionReconciliation) {
         await assertExecutionReconciliationAuthority(req, existing);
       }
+      if (continuationPolicy === "manual") {
+        assertBoard(req);
+      }
+
+      const continuationRequired =
+        sourceIssueStatus === "todo" && continuationPolicy !== "manual";
 
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
@@ -9531,7 +9538,7 @@ export function issueRoutes(
               activeRecoveryAction.evidence.runId ??
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
-            continuationRequired: sourceIssueStatus === "todo",
+            continuationRequired,
           });
         } else if (executionReconciliation) {
           throw conflict(
@@ -9595,7 +9602,7 @@ export function issueRoutes(
             chatRetry
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
-            { continuationRequired: sourceIssueStatus === "todo" },
+            { continuationRequired },
           );
           await tx
             .update(issueRecoveryActions)

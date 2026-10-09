@@ -296,6 +296,32 @@ describe("issue validators", () => {
     ).toBe(false);
   });
 
+  it("requires an execution receipt for manual continuation policy", () => {
+    expect(
+      resolveIssueRecoveryActionSchema.safeParse({
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        continuationPolicy: "manual",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      resolveIssueRecoveryActionSchema.parse({
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        continuationPolicy: "manual",
+        executionReconciliation: {
+          runId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The deterministic pre-admission gate proves no provider action occurred.",
+        },
+      }).continuationPolicy,
+    ).toBe("manual");
+  });
+
   it("validates typed stopped-execution reconciliation receipts", () => {
     expect(
       executionReconciliationResultSchema.parse({
