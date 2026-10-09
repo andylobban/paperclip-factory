@@ -57,6 +57,7 @@ function buildContext(
 async function createMockGatewayServer(options?: {
   waitPayload?: Record<string, unknown>;
   holdWait?: boolean;
+  waitResponseDelayMs?: number;
   emitAgentEvents?: boolean;
   abortResponsePayload?: Record<string, unknown>;
   settleAfterAbort?: boolean;
@@ -67,6 +68,7 @@ async function createMockGatewayServer(options?: {
   let agentPayload: Record<string, unknown> | null = null;
   let abortPayload: Record<string, unknown> | null = null;
   let waitRequestCount = 0;
+  const heldWaitRequestIds: string[] = [];
 
   wss.on("connection", (socket) => {
     socket.send(
@@ -175,20 +177,31 @@ async function createMockGatewayServer(options?: {
           );
           return;
         }
-        if (options?.holdWait) return;
-        socket.send(
-          JSON.stringify({
-            type: "res",
-            id: frame.id,
-            ok: true,
-            payload: options?.waitPayload ?? {
-              runId: frame.params?.runId,
-              status: "ok",
-              startedAt: 1,
-              endedAt: 2,
-            },
-          }),
-        );
+        if (options?.holdWait) {
+          heldWaitRequestIds.push(frame.id);
+          return;
+        }
+        const sendWaitResponse = () => {
+          if (socket.readyState !== 1) return;
+          socket.send(
+            JSON.stringify({
+              type: "res",
+              id: frame.id,
+              ok: true,
+              payload: options?.waitPayload ?? {
+                runId: frame.params?.runId,
+                status: "ok",
+                startedAt: 1,
+                endedAt: 2,
+              },
+            }),
+          );
+        };
+        if (options?.waitResponseDelayMs) {
+          setTimeout(sendWaitResponse, options.waitResponseDelayMs);
+        } else {
+          sendWaitResponse();
+        }
         return;
       }
 
@@ -206,6 +219,22 @@ async function createMockGatewayServer(options?: {
             },
           }),
         );
+        if (options?.settleAfterAbort !== false) {
+          for (const waitRequestId of heldWaitRequestIds.splice(0)) {
+            socket.send(
+              JSON.stringify({
+                type: "res",
+                id: waitRequestId,
+                ok: true,
+                payload: {
+                  runId: frame.params?.runId,
+                  status: "cancelled",
+                  endedAt: Date.now(),
+                },
+              }),
+            );
+          }
+        }
       }
     });
   });
@@ -592,6 +621,82 @@ describe("openclaw gateway adapter execute", () => {
     const result = await execute(buildContext({}));
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("openclaw_gateway_url_missing");
+  });
+
+  it("keeps the authoritative wait alive until a delayed terminal receipt arrives", async () => {
+    const gateway = await createMockGatewayServer({
+      waitResponseDelayMs: 1_100,
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          timeoutSec: 1,
+          queueTimeoutMs: 2_000,
+          idleTimeoutMs: 2_000,
+          waitPollIntervalMs: 5,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        exitCode: 0,
+        timedOut: false,
+        resultJson: {
+          providerSettlement: {
+            state: "terminal",
+            runId: "run-123",
+            terminalStatus: "ok",
+            source: "agent.wait",
+          },
+        },
+      });
+      expect(gateway.getWaitRequestCount()).toBe(1);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("still enforces the local queue deadline while the provider wait is held", async () => {
+    const gateway = await createMockGatewayServer({
+      holdWait: true,
+      emitAgentEvents: false,
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          queueTimeoutMs: 40,
+          idleTimeoutMs: 40,
+          waitPollIntervalMs: 5,
+          cancelSettlementTimeoutMs: 100,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        timedOut: true,
+        errorCode: "openclaw_gateway_wait_timeout",
+        resultJson: {
+          executionCancellation: { state: "acknowledged" },
+          providerSettlement: {
+            state: "terminal",
+            runId: "run-123",
+            terminalStatus: "cancelled",
+          },
+        },
+      });
+      expect(gateway.getAbortPayload()).toEqual({
+        runId: "run-123",
+        key: "paperclip:issue:issue-123",
+        clearQueued: true,
+      });
+      expect(gateway.getWaitRequestCount()).toBe(1);
+    } finally {
+      await gateway.close();
+    }
   });
 
   it("aborts and verifies the remote run before returning a queue timeout", async () => {

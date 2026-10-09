@@ -1445,6 +1445,10 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
     let cancellationPromise: Promise<GatewayCancellation> | null = null;
     let acceptedRunIdForCancellation: string | null = null;
+    type ProviderWaitOutcome =
+      | { kind: "wait"; payload: Record<string, unknown> }
+      | { kind: "wait_error"; error: unknown };
+    let providerWaitInFlight: Promise<ProviderWaitOutcome> | null = null;
     let resolveCancellationRequested!: () => void;
     const cancellationRequested = new Promise<void>((resolve) => {
       resolveCancellationRequested = resolve;
@@ -1478,6 +1482,30 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
       runId: string,
     ): Promise<GatewayProviderSettlement | null> => {
       const deadlineAt = Date.now() + cancelSettlementTimeoutMs;
+      if (providerWaitInFlight) {
+        let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+        const pendingOutcome = await Promise.race([
+          providerWaitInFlight,
+          new Promise<{ kind: "deadline" }>((resolve) => {
+            deadlineTimer = setTimeout(
+              () => resolve({ kind: "deadline" }),
+              cancelSettlementTimeoutMs,
+            );
+          }),
+        ]);
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        if (pendingOutcome.kind === "deadline") {
+          return providerSettlement?.runId === runId ? providerSettlement : null;
+        }
+        providerWaitInFlight = null;
+        if (pendingOutcome.kind === "wait") {
+          const settlement = settlementFromWait(runId, pendingOutcome.payload);
+          if (settlement) {
+            providerSettlement = settlement;
+            return settlement;
+          }
+        }
+      }
       while (Date.now() < deadlineAt) {
         if (providerSettlement?.runId === runId) return providerSettlement;
         const remainingMs = deadlineAt - Date.now();
@@ -1753,19 +1781,37 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
             });
           }
           const pollMs = Math.max(1, Math.min(waitPollIntervalMs, remainingMs));
+          // Keep one authoritative provider wait in flight. Some OpenClaw
+          // versions do not return when the requested wait timeout elapses,
+          // even though the run is still healthy and eventually settles. A
+          // client-side request timeout used to abandon that live wait and
+          // fence Paperclip before the terminal receipt arrived. Local ticks
+          // still enforce queue/idle deadlines and cancellation, without
+          // creating overlapping provider waits or discarding a late receipt.
+          providerWaitInFlight ??= client
+            .request<Record<string, unknown>>(
+              "agent.wait",
+              { runId: acceptedRunId, timeoutMs: pollMs },
+              { timeoutMs: 0 },
+            )
+            .then((payload) => ({ kind: "wait" as const, payload }))
+            .catch((error: unknown) => ({ kind: "wait_error" as const, error }));
+          let pollTimer: ReturnType<typeof setTimeout> | null = null;
+          const pollTick = new Promise<{ kind: "poll" }>((resolve) => {
+            pollTimer = setTimeout(() => resolve({ kind: "poll" }), pollMs);
+          });
           const waitOutcome = await Promise.race([
-            client
-              .request<Record<string, unknown>>(
-                "agent.wait",
-                { runId: acceptedRunId, timeoutMs: pollMs },
-                { timeoutMs: pollMs + connectTimeoutMs },
-              )
-              .then((payload) => ({ kind: "wait" as const, payload })),
+            providerWaitInFlight,
             cancellationRequested.then(() => ({ kind: "cancelled" as const })),
+            pollTick,
           ]);
+          if (pollTimer) clearTimeout(pollTimer);
+          if (waitOutcome.kind === "poll") continue;
           if (waitOutcome.kind === "cancelled") {
             return await cancellationResult({ reason: "operator", latestPayload: latestResultPayload });
           }
+          providerWaitInFlight = null;
+          if (waitOutcome.kind === "wait_error") throw waitOutcome.error;
 
           const waitPayload = waitOutcome.payload;
           latestResultPayload = waitPayload;
