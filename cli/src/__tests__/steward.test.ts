@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { HeartbeatRun } from "@paperclipai/shared";
-import { classifyDeterministicNonAdmission } from "../commands/client/steward.js";
+import type { HeartbeatRun, Issue } from "@paperclipai/shared";
+import {
+  buildStewardAttentionInteraction,
+  classifyDeterministicNonAdmission,
+  stewardAttentionFingerprint,
+  type StewardAttentionCase,
+} from "../commands/client/steward.js";
 
 function run(overrides: Partial<HeartbeatRun>): HeartbeatRun {
   return {
@@ -79,5 +84,74 @@ describe("deterministic steward reconciliation", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+function attentionCase(
+  identifier: string,
+  overrides: Partial<StewardAttentionCase> = {},
+): StewardAttentionCase {
+  return {
+    identifier,
+    issueId: `issue-${identifier}`,
+    title: `Title ${identifier}`,
+    status: "blocked",
+    classification: "terminal_receipt_requires_judgement",
+    reason: "Outcome needs judgement.",
+    runId: `run-${identifier}`,
+    recoveryActionId: `recovery-${identifier}`,
+    updatedAt: "2026-10-09T07:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("deterministic steward attention digest", () => {
+  it("uses a stable order-independent fingerprint and changes it with source state", () => {
+    const first = attentionCase("AND-732");
+    const second = attentionCase("AND-624");
+    expect(stewardAttentionFingerprint([first, second])).toBe(
+      stewardAttentionFingerprint([second, first]),
+    );
+    expect(
+      stewardAttentionFingerprint([
+        first,
+        { ...second, updatedAt: "2026-10-09T07:01:00.000Z" },
+      ]),
+    ).not.toBe(stewardAttentionFingerprint([first, second]));
+    expect(stewardAttentionFingerprint([])).toBeNull();
+  });
+
+  it("builds one human-only acknowledgement without mutating source cases", () => {
+    const cases = [
+      attentionCase("AND-732"),
+      attentionCase("AND-707", {
+        classification: "unsettled_requires_judgement",
+      }),
+    ];
+    const interaction = buildStewardAttentionInteraction(
+      {
+        id: "attention-issue",
+        responsibleUserId: "andy-user",
+      } as Issue,
+      cases,
+      "abc123",
+      4,
+    );
+    expect(interaction.resolverPolicy).toBe("human_only");
+    expect(interaction.continuationPolicy).toBe("none");
+    expect(interaction.addresseeUserId).toBe("andy-user");
+    expect(interaction.idempotencyKey).toBe(
+      "factory-recovery-attention:v1:abc123",
+    );
+    expect(interaction.kind).toBe("request_confirmation");
+    if (interaction.kind !== "request_confirmation") {
+      throw new Error("Expected request_confirmation interaction");
+    }
+    expect(interaction.payload.detailsMarkdown).toContain(
+      "[AND-732](/AND/issues/AND-732)",
+    );
+    expect(interaction.payload.detailsMarkdown).toContain(
+      "4 additional issues have an existing pending human-only interaction",
+    );
   });
 });
