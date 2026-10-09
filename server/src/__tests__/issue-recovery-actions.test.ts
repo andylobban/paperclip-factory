@@ -2266,6 +2266,79 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     ).toBe("todo");
   });
 
+  it.each([
+    {
+      name: "stale queued-run review gate",
+      run: {
+        status: "cancelled" as const,
+        startedAt: null,
+        errorCode: "issue_continuation_waiting_on_review",
+        error: "Cancelled before execution because reviewer feedback is still pending",
+        resultJson: {
+          stopReason: "issue_continuation_waiting_on_review",
+          timeoutFired: false,
+          timeoutSource: "stale_queued_run_gate",
+        },
+      },
+    },
+    {
+      name: "local gateway connection refusal",
+      run: {
+        status: "failed" as const,
+        errorCode: "openclaw_gateway_request_failed",
+        error: "connect ECONNREFUSED 127.0.0.1:18789",
+        resultJson: {
+          stopReason: "adapter_failed",
+          timeoutFired: false,
+          timeoutSource: "config",
+        },
+      },
+    },
+  ])("accepts verified non-admission for a deterministic pre-provider $name", async ({ run }) => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        ...run,
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The server-owned terminal record proves this exact run stopped before provider admission or external action.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.executionReconciliationResult).toMatchObject({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      replayStarted: false,
+    });
+  });
+
   it("rejects verified non-admission when the stopped OpenClaw run has useful activity", async () => {
     const { companyId, coderId, sourceIssueId, runId, action } =
       await seedAutomaticNoReplayHold();
@@ -2311,6 +2384,52 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
         ?.status,
     ).toBe("blocked");
+  });
+
+  it("keeps an ambiguous lease-release interruption fenced despite no observed activity", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "interrupted",
+        errorCode: "lease_released_before_terminal",
+        error: "Run terminalized while its environment lease was released.",
+        resultJson: null,
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "No Paperclip activity was observed, but the provider admission outcome is still ambiguous.",
+        },
+      })
+      .expect(409);
+
+    expect(response.body.code).toBe(
+      "execution_provider_non_admission_unverified",
+    );
   });
 
   it("exposes a resolved no-replay hold through a typed diagnostic without changing active recovery reads", async () => {

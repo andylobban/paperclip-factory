@@ -185,14 +185,32 @@ export async function validateExecutionReconciliation(input: {
       settlement.terminalStatus.length === 0 ||
       !Number.isFinite(settledAt);
     if (providerAdmission === "verified_not_admitted") {
-      const runProvesNoAdmission =
+      const noObservedProviderWork =
         decision.actionOutcome === "not_performed" &&
         !run.lastUsefulActionAt &&
         !run.usageJson &&
-        !settlement &&
+        !settlement;
+      const timedOutBeforeObservedAdmission =
         run.resultJson?.timeoutFired === true &&
         ["timeout", "cancelled", "failed"].includes(
           String(run.resultJson?.stopReason ?? ""),
+        );
+      const rejectedByQueuedRunGate =
+        !run.startedAt &&
+        run.errorCode === "issue_continuation_waiting_on_review" &&
+        run.resultJson?.stopReason === "issue_continuation_waiting_on_review" &&
+        run.resultJson?.timeoutSource === "stale_queued_run_gate";
+      const gatewayConnectionRefusedBeforeAdmission =
+        run.errorCode === "openclaw_gateway_request_failed" &&
+        run.resultJson?.stopReason === "adapter_failed" &&
+        typeof run.error === "string" &&
+        /^connect ECONNREFUSED(?:\s|$)/.test(run.error);
+      const runProvesNoAdmission =
+        noObservedProviderWork &&
+        (
+          timedOutBeforeObservedAdmission ||
+          rejectedByQueuedRunGate ||
+          gatewayConnectionRefusedBeforeAdmission
         );
       if (!runProvesNoAdmission) {
         throw conflict(
