@@ -481,6 +481,13 @@ function buildWakeText(
 
   const issueIdHint = payload.taskId ?? payload.issueId ?? "";
   const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
+  const quotedCredentialPath = `'${claimedApiKeyPath.replaceAll("'", `'"'"'`)}'`;
+  const credentialLoadPrefix =
+    `PAPERCLIP_API_KEY="$(tr -d '\\r\\n' < ${quotedCredentialPath})"; export PAPERCLIP_API_KEY;`;
+  const credentialShellGuidance = [
+    `Start every host-local Paperclip API shell call with this exact prefix before curl: ${credentialLoadPrefix}`,
+    "Keep the semicolons. Never use PAPERCLIP_API_KEY=$(...) curl ... because the shell expands the curl header before that inline assignment takes effect, which sends an empty or stale bearer.",
+  ];
 
   if (conversationTaskMarkdown !== undefined) {
     return [
@@ -489,6 +496,7 @@ function buildWakeText(
       ...envLines,
       `Load PAPERCLIP_API_KEY by reading the single line in ${claimedApiKeyPath}. This is a run-scoped credential file; do not print or persist its contents.`,
       "Read that file and call the Paperclip API only from the host-local bash/terminal tool. Do not use gateway_exec, node_exec, or another remote execution tool for Paperclip credentials: remote secret boundaries can redact the bearer before the request is sent.",
+      ...credentialShellGuidance,
       "Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutation.",
       "Follow the supplied chat mode directive. Keep this conversation available for the next message.",
       structuredWakePrompt,
@@ -507,6 +515,7 @@ function buildWakeText(
     "",
     `Load PAPERCLIP_API_KEY by reading the single line in ${claimedApiKeyPath}. This is a run-scoped credential file; do not print or persist its contents.`,
     "Read that file and call the Paperclip API only from the host-local bash/terminal tool. Do not use gateway_exec, node_exec, or another remote execution tool for Paperclip credentials: remote secret boundaries can redact the bearer before the request is sent.",
+    ...credentialShellGuidance,
     "",
     `api_base=${apiBaseHint}`,
     `task_id=${payload.taskId ?? ""}`,

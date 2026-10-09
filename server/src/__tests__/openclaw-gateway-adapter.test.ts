@@ -505,6 +505,11 @@ describe("openclaw gateway adapter execute", () => {
   it("runs connect -> agent -> agent.wait and forwards wake payload", async () => {
     const gateway = await createMockGatewayServer();
     const logs: string[] = [];
+    const claimedApiKeyPath = createClaimedApiKeyPath();
+    const credentialPath = path.join(
+      path.dirname(claimedApiKeyPath),
+      ".paperclip-run-run-123.key",
+    );
 
     try {
       const result = await execute(
@@ -517,6 +522,7 @@ describe("openclaw gateway adapter execute", () => {
             payloadTemplate: {
               message: "wake now",
             },
+            claimedApiKeyPath,
             waitTimeoutMs: 2000,
           },
           {
@@ -604,6 +610,12 @@ describe("openclaw gateway adapter execute", () => {
       );
       expect(String(payload?.message ?? "")).toContain(
         "Do not use gateway_exec, node_exec",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        `PAPERCLIP_API_KEY="$(tr -d '\\r\\n' < '${credentialPath}')"; export PAPERCLIP_API_KEY;`,
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "Never use PAPERCLIP_API_KEY=$(...) curl",
       );
       expect(String(payload?.message ?? "")).toContain("## Paperclip Wake Payload");
       expect(String(payload?.message ?? "")).toContain(
