@@ -131,7 +131,7 @@ export interface StewardExistingHumanGate {
   updatedAt: string;
 }
 
-interface StewardAttentionReport {
+export interface StewardAttentionReport {
   schema: "paperclip.steward_attention.v2";
   mode: "dry_run" | "apply";
   companyId: string;
@@ -173,7 +173,7 @@ interface StewardApplyDecisionAction {
   exactMutation: string;
 }
 
-interface StewardApplyDecisionsReport {
+export interface StewardApplyDecisionsReport {
   schema: "paperclip.steward_attention_apply.v1";
   mode: "dry_run" | "apply";
   companyId: string;
@@ -1100,7 +1100,7 @@ function approvedAttentionDecisions(
   return decisions;
 }
 
-async function applyStewardProposal(
+export async function applyStewardProposal(
   ctx: ResolvedClientContext,
   proposal: StewardAttentionCase,
 ): Promise<void> {
@@ -1168,6 +1168,281 @@ async function applyStewardProposal(
       `Postcondition failed: status=${current.status}, executionBlocker=${Boolean(current.executionBlocker)}, activeRun=${verifiedActiveRun?.id ?? "none"}`,
     );
   }
+}
+
+export async function applyStewardAttentionReview(
+  ctx: ResolvedClientContext,
+  input: {
+    companyId: string;
+    attentionIssue: Issue;
+    cases: StewardAttentionCase[];
+    existingHumanGates: StewardExistingHumanGate[];
+    interactions: IssueThreadInteraction[];
+    apply: boolean;
+    scannedIssueCount: number;
+    heldIssueCount: number;
+  },
+): Promise<StewardAttentionReport> {
+  const fingerprint = stewardAttentionFingerprint(
+    input.cases,
+    input.existingHumanGates,
+  );
+  const ownedInteractions = input.interactions.filter(
+    (interaction) =>
+      interaction.idempotencyKey?.startsWith(ATTENTION_IDEMPOTENCY_PREFIX) ||
+      interaction.idempotencyKey?.startsWith(
+        LEGACY_ATTENTION_IDEMPOTENCY_PREFIX,
+      ),
+  );
+  const currentKey = fingerprint
+    ? `${ATTENTION_IDEMPOTENCY_PREFIX}${fingerprint}`
+    : null;
+  const current = currentKey
+    ? ownedInteractions.find(
+        (interaction) => interaction.idempotencyKey === currentKey,
+      ) ?? null
+    : null;
+  const stalePending = ownedInteractions.filter(
+    (interaction) =>
+      interaction.status === "pending" &&
+      interaction.idempotencyKey !== currentKey,
+  );
+
+  const report: StewardAttentionReport = {
+    schema: "paperclip.steward_attention.v2",
+    mode: input.apply ? "apply" : "dry_run",
+    companyId: input.companyId,
+    scannedAt: new Date().toISOString(),
+    scannedIssueCount: input.scannedIssueCount,
+    heldIssueCount: input.heldIssueCount,
+    attentionCaseCount: input.cases.length,
+    humanGateCount: input.existingHumanGates.length,
+    fingerprint,
+    interactionId: current?.id ?? null,
+    action: "none",
+    supersededInteractionIds: [],
+    reason: "No operator proposal review is required.",
+    cases: input.cases,
+    existingHumanGates: input.existingHumanGates,
+  };
+
+  if (input.cases.length === 0) {
+    if (stalePending.length === 0) {
+      report.reason =
+        "No judgement cases or stale pending proposal review exist.";
+    } else if (!input.apply) {
+      report.action = "would_clear";
+      report.reason = `${stalePending.length} stale pending proposal review interaction(s) would be withdrawn.`;
+    } else {
+      for (const interaction of stalePending) {
+        await withdrawAttentionInteraction(
+          ctx,
+          input.attentionIssue.id,
+          interaction.id,
+          "No fenced recovery case currently requires judgement.",
+        );
+        report.supersededInteractionIds.push(interaction.id);
+      }
+      report.action = "cleared";
+      report.reason =
+        "Stale proposal review withdrawn because no judgement cases remain.";
+    }
+  } else if (current) {
+    if (input.apply) {
+      for (const interaction of stalePending) {
+        await withdrawAttentionInteraction(
+          ctx,
+          input.attentionIssue.id,
+          interaction.id,
+          "Superseded by the current deterministic governed proposal review.",
+        );
+        report.supersededInteractionIds.push(interaction.id);
+      }
+    }
+    report.action =
+      current.status === "pending"
+        ? "pending_unchanged"
+        : "decided_unchanged";
+    report.reason =
+      current.status === "pending"
+        ? "The current governed proposal review is already pending; no duplicate was created."
+        : "The current proposals were already decided; unchanged cases remain suppressed.";
+  } else if (!input.apply) {
+    report.action = "would_notify";
+    report.reason =
+      "A changed recovery-case set would create one human-only governed proposal review.";
+  } else {
+    try {
+      const created = requireResponse(
+        await ctx.api.post<IssueThreadInteraction>(
+          apiPath`/api/issues/${input.attentionIssue.id}/interactions`,
+          buildStewardAttentionInteraction(
+            input.attentionIssue,
+            input.cases,
+            fingerprint!,
+            input.existingHumanGates,
+          ),
+        ),
+        "steward attention interaction",
+      );
+      report.interactionId = created.id;
+      for (const interaction of stalePending) {
+        await withdrawAttentionInteraction(
+          ctx,
+          input.attentionIssue.id,
+          interaction.id,
+          "Superseded by a changed deterministic governed proposal review.",
+        );
+        report.supersededInteractionIds.push(interaction.id);
+      }
+      report.action = "notified";
+      report.reason =
+        "Created one human-only governed proposal review; source issues and recovery gates were not changed.";
+    } catch (error) {
+      report.action = "failed";
+      report.reason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return report;
+}
+
+export async function runStewardApplyDecisions(
+  ctx: ResolvedClientContext,
+  input: {
+    companyId: string;
+    attentionIssueId: string;
+    apply: boolean;
+    maxActions: number;
+  },
+): Promise<StewardApplyDecisionsReport> {
+  const attentionIssue = requireResponse(
+    await ctx.api.get<Issue>(apiPath`/api/issues/${input.attentionIssueId}`),
+    `attention issue ${input.attentionIssueId}`,
+  );
+  if (attentionIssue.companyId !== input.companyId) {
+    throw new Error("The attention issue belongs to a different company.");
+  }
+  const interactions =
+    (await ctx.api.get<IssueThreadInteraction[]>(
+      apiPath`/api/issues/${attentionIssue.id}/interactions`,
+    )) ?? [];
+  const decisions = approvedAttentionDecisions(interactions);
+  const actions: StewardApplyDecisionAction[] = [];
+  let attemptedMutations = 0;
+
+  for (const decision of decisions) {
+    const current = await inspectCurrentAttentionProposal(
+      ctx,
+      decision.issueId,
+    );
+    if (!current) {
+      actions.push({
+        identifier: decision.issueId,
+        issueId: decision.issueId,
+        interactionId: decision.interaction.id,
+        itemId: decision.itemId,
+        recommendedDisposition: "human_decision_required",
+        action: "skipped",
+        reason:
+          "The source is no longer an uncovered attention case. No mutation was attempted.",
+        exactMutation: "None.",
+      });
+      continue;
+    }
+    const expectedItemId = attentionItemId(current);
+    if (
+      expectedItemId !== decision.itemId ||
+      current.proposalFingerprint.slice(0, 40) !==
+        decision.proposalFingerprint
+    ) {
+      actions.push({
+        identifier: current.identifier,
+        issueId: current.issueId,
+        interactionId: decision.interaction.id,
+        itemId: decision.itemId,
+        recommendedDisposition: current.recommendedDisposition,
+        action: "skipped",
+        reason:
+          "The source snapshot or recommended effect changed after the verdict. No mutation was attempted.",
+        exactMutation: current.exactMutation,
+      });
+      continue;
+    }
+
+    if (
+      current.recommendedDisposition === "remain_blocked" ||
+      current.recommendedDisposition === "human_decision_required"
+    ) {
+      actions.push({
+        identifier: current.identifier,
+        issueId: current.issueId,
+        interactionId: decision.interaction.id,
+        itemId: decision.itemId,
+        recommendedDisposition: current.recommendedDisposition,
+        action: "recorded_no_source_change",
+        reason:
+          "The approved disposition intentionally preserves the current source fence; the interaction verdict is the audit record.",
+        exactMutation: current.exactMutation,
+      });
+      continue;
+    }
+
+    if (attemptedMutations >= input.maxActions) {
+      actions.push({
+        identifier: current.identifier,
+        issueId: current.issueId,
+        interactionId: decision.interaction.id,
+        itemId: decision.itemId,
+        recommendedDisposition: current.recommendedDisposition,
+        action: "skipped",
+        reason: `The ${input.maxActions}-mutation budget was exhausted; this proposal remains pending application.`,
+        exactMutation: current.exactMutation,
+      });
+      continue;
+    }
+
+    const action: StewardApplyDecisionAction = {
+      identifier: current.identifier,
+      issueId: current.issueId,
+      interactionId: decision.interaction.id,
+      itemId: decision.itemId,
+      recommendedDisposition: current.recommendedDisposition,
+      action: "would_apply",
+      reason:
+        "The approved proposal still matches the freshly derived source snapshot.",
+      exactMutation: current.exactMutation,
+    };
+    actions.push(action);
+    if (!input.apply) continue;
+
+    attemptedMutations += 1;
+    try {
+      await applyStewardProposal(ctx, current);
+      action.action = "applied";
+      action.reason =
+        "The exact approved proposal was applied after fresh revalidation; postconditions passed.";
+    } catch (error) {
+      action.action = "failed";
+      action.reason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return {
+    schema: "paperclip.steward_attention_apply.v1",
+    mode: input.apply ? "apply" : "dry_run",
+    companyId: input.companyId,
+    scannedAt: new Date().toISOString(),
+    approvedDecisionCount: decisions.length,
+    mutationCandidateCount: actions.filter((action) =>
+      ["would_apply", "applied", "failed"].includes(action.action),
+    ).length,
+    appliedCount: actions.filter((action) => action.action === "applied")
+      .length,
+    failedCount: actions.filter((action) => action.action === "failed")
+      .length,
+    actions,
+  };
 }
 
 export function registerStewardCommands(program: Command): void {
@@ -1365,132 +1640,20 @@ export function registerStewardCommands(program: Command): void {
               companyId,
               presentAttentionIssue.id,
             );
-          const fingerprint = stewardAttentionFingerprint(
-            cases,
-            existingHumanGates,
-          );
           const interactions =
             (await ctx.api.get<IssueThreadInteraction[]>(
               apiPath`/api/issues/${presentAttentionIssue.id}/interactions`,
             )) ?? [];
-          const ownedInteractions = interactions.filter(
-            (interaction) =>
-              interaction.idempotencyKey?.startsWith(
-                ATTENTION_IDEMPOTENCY_PREFIX,
-              ) ||
-              interaction.idempotencyKey?.startsWith(
-                LEGACY_ATTENTION_IDEMPOTENCY_PREFIX,
-              ),
-          );
-          const currentKey = fingerprint
-            ? `${ATTENTION_IDEMPOTENCY_PREFIX}${fingerprint}`
-            : null;
-          const current = currentKey
-            ? ownedInteractions.find(
-                (interaction) => interaction.idempotencyKey === currentKey,
-              ) ?? null
-            : null;
-          const stalePending = ownedInteractions.filter(
-            (interaction) =>
-              interaction.status === "pending" &&
-              interaction.idempotencyKey !== currentKey,
-          );
-
-          const report: StewardAttentionReport = {
-            schema: "paperclip.steward_attention.v2",
-            mode: opts.apply ? "apply" : "dry_run",
+          const report = await applyStewardAttentionReview(ctx, {
             companyId,
-            scannedAt: new Date().toISOString(),
-            scannedIssueCount: openIssues.length,
-            heldIssueCount: inspections.length,
-            attentionCaseCount: cases.length,
-            humanGateCount: existingHumanGates.length,
-            fingerprint,
-            interactionId: current?.id ?? null,
-            action: "none",
-            supersededInteractionIds: [],
-            reason: "No operator proposal review is required.",
+            attentionIssue: presentAttentionIssue,
             cases,
             existingHumanGates,
-          };
-
-          if (cases.length === 0) {
-            if (stalePending.length === 0) {
-              report.reason =
-                "No judgement cases or stale pending proposal review exist.";
-            } else if (!opts.apply) {
-              report.action = "would_clear";
-              report.reason = `${stalePending.length} stale pending proposal review interaction(s) would be withdrawn.`;
-            } else {
-              for (const interaction of stalePending) {
-                await withdrawAttentionInteraction(
-                  ctx,
-                  presentAttentionIssue.id,
-                  interaction.id,
-                  "No fenced recovery case currently requires judgement.",
-                );
-                report.supersededInteractionIds.push(interaction.id);
-              }
-              report.action = "cleared";
-              report.reason =
-                "Stale proposal review withdrawn because no judgement cases remain.";
-            }
-          } else if (current) {
-            if (opts.apply) {
-              for (const interaction of stalePending) {
-                await withdrawAttentionInteraction(
-                  ctx,
-                  presentAttentionIssue.id,
-                  interaction.id,
-                  "Superseded by the current deterministic governed proposal review.",
-                );
-                report.supersededInteractionIds.push(interaction.id);
-              }
-            }
-            report.action =
-              current.status === "pending"
-                ? "pending_unchanged"
-                : "decided_unchanged";
-            report.reason =
-              current.status === "pending"
-                ? "The current governed proposal review is already pending; no duplicate was created."
-                : "The current proposals were already decided; unchanged cases remain suppressed.";
-          } else if (!opts.apply) {
-            report.action = "would_notify";
-            report.reason =
-              "A changed recovery-case set would create one human-only governed proposal review.";
-          } else {
-            try {
-              const created = requireResponse(
-                await ctx.api.post<IssueThreadInteraction>(
-                  apiPath`/api/issues/${presentAttentionIssue.id}/interactions`,
-                  buildStewardAttentionInteraction(
-                    presentAttentionIssue,
-                    cases,
-                    fingerprint!,
-                    existingHumanGates,
-                  ),
-                ),
-                "steward attention interaction",
-              );
-              report.interactionId = created.id;
-              for (const interaction of stalePending) {
-                await withdrawAttentionInteraction(
-                  ctx,
-                  presentAttentionIssue.id,
-                  interaction.id,
-                  "Superseded by a changed deterministic governed proposal review.",
-                );
-                report.supersededInteractionIds.push(interaction.id);
-              }
-              report.action = "notified";
-              report.reason =
-                "Created one human-only governed proposal review; source issues and recovery gates were not changed.";
-            } catch (error) {
-              report.action = "failed";
-              report.reason = error instanceof Error ? error.message : String(error);
-            }
-          }
+            interactions,
+            apply: Boolean(opts.apply),
+            scannedIssueCount: openIssues.length,
+            heldIssueCount: inspections.length,
+          });
 
           printOutput(report, { json: ctx.json });
           if (report.action === "failed") process.exitCode = 1;
@@ -1519,133 +1682,12 @@ export function registerStewardCommands(program: Command): void {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const companyId = ctx.companyId!;
           const maxActions = parseMaxActions(opts.maxActions);
-          const attentionIssue = requireResponse(
-            await ctx.api.get<Issue>(apiPath`/api/issues/${opts.attentionIssue}`),
-            `attention issue ${opts.attentionIssue}`,
-          );
-          if (attentionIssue.companyId !== companyId) {
-            throw new Error("The attention issue belongs to a different company.");
-          }
-          const interactions =
-            (await ctx.api.get<IssueThreadInteraction[]>(
-              apiPath`/api/issues/${attentionIssue.id}/interactions`,
-            )) ?? [];
-          const decisions = approvedAttentionDecisions(interactions);
-          const actions: StewardApplyDecisionAction[] = [];
-          let attemptedMutations = 0;
-
-          for (const decision of decisions) {
-            const current = await inspectCurrentAttentionProposal(
-              ctx,
-              decision.issueId,
-            );
-            if (!current) {
-              actions.push({
-                identifier: decision.issueId,
-                issueId: decision.issueId,
-                interactionId: decision.interaction.id,
-                itemId: decision.itemId,
-                recommendedDisposition: "human_decision_required",
-                action: "skipped",
-                reason:
-                  "The source is no longer an uncovered attention case. No mutation was attempted.",
-                exactMutation: "None.",
-              });
-              continue;
-            }
-            const expectedItemId = attentionItemId(current);
-            if (
-              expectedItemId !== decision.itemId ||
-              current.proposalFingerprint.slice(0, 40) !==
-                decision.proposalFingerprint
-            ) {
-              actions.push({
-                identifier: current.identifier,
-                issueId: current.issueId,
-                interactionId: decision.interaction.id,
-                itemId: decision.itemId,
-                recommendedDisposition: current.recommendedDisposition,
-                action: "skipped",
-                reason:
-                  "The source snapshot or recommended effect changed after the verdict. No mutation was attempted.",
-                exactMutation: current.exactMutation,
-              });
-              continue;
-            }
-
-            if (
-              current.recommendedDisposition === "remain_blocked" ||
-              current.recommendedDisposition === "human_decision_required"
-            ) {
-              actions.push({
-                identifier: current.identifier,
-                issueId: current.issueId,
-                interactionId: decision.interaction.id,
-                itemId: decision.itemId,
-                recommendedDisposition: current.recommendedDisposition,
-                action: "recorded_no_source_change",
-                reason:
-                  "The approved disposition intentionally preserves the current source fence; the interaction verdict is the audit record.",
-                exactMutation: current.exactMutation,
-              });
-              continue;
-            }
-
-            if (attemptedMutations >= maxActions) {
-              actions.push({
-                identifier: current.identifier,
-                issueId: current.issueId,
-                interactionId: decision.interaction.id,
-                itemId: decision.itemId,
-                recommendedDisposition: current.recommendedDisposition,
-                action: "skipped",
-                reason: `The ${maxActions}-mutation budget was exhausted; this proposal remains pending application.`,
-                exactMutation: current.exactMutation,
-              });
-              continue;
-            }
-
-            const action: StewardApplyDecisionAction = {
-              identifier: current.identifier,
-              issueId: current.issueId,
-              interactionId: decision.interaction.id,
-              itemId: decision.itemId,
-              recommendedDisposition: current.recommendedDisposition,
-              action: "would_apply",
-              reason:
-                "The approved proposal still matches the freshly derived source snapshot.",
-              exactMutation: current.exactMutation,
-            };
-            actions.push(action);
-            if (!opts.apply) continue;
-
-            attemptedMutations += 1;
-            try {
-              await applyStewardProposal(ctx, current);
-              action.action = "applied";
-              action.reason =
-                "The exact approved proposal was applied after fresh revalidation; postconditions passed.";
-            } catch (error) {
-              action.action = "failed";
-              action.reason = error instanceof Error ? error.message : String(error);
-            }
-          }
-
-          const report: StewardApplyDecisionsReport = {
-            schema: "paperclip.steward_attention_apply.v1",
-            mode: opts.apply ? "apply" : "dry_run",
+          const report = await runStewardApplyDecisions(ctx, {
             companyId,
-            scannedAt: new Date().toISOString(),
-            approvedDecisionCount: decisions.length,
-            mutationCandidateCount: actions.filter((action) =>
-              ["would_apply", "applied", "failed"].includes(action.action),
-            ).length,
-            appliedCount: actions.filter((action) => action.action === "applied")
-              .length,
-            failedCount: actions.filter((action) => action.action === "failed")
-              .length,
-            actions,
-          };
+            attentionIssueId: opts.attentionIssue,
+            apply: Boolean(opts.apply),
+            maxActions,
+          });
           printOutput(report, { json: ctx.json });
           if (report.failedCount > 0) process.exitCode = 1;
         } catch (error) {

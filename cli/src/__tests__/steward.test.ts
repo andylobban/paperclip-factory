@@ -1,14 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HeartbeatRun, Issue, IssueComment } from "@paperclipai/shared";
 import {
+  applyStewardAttentionReview,
+  applyStewardProposal,
   buildStewardAttentionInteraction,
   classifyDeterministicNonAdmission,
   deriveStewardAttentionCase,
+  runStewardApplyDecisions,
   stewardAttentionFingerprint,
   type StewardAttentionCase,
   type StewardExistingHumanGate,
   type StewardReconciliationInspection,
 } from "../commands/client/steward.js";
+import type { ResolvedClientContext } from "../commands/client/common.js";
 
 function run(overrides: Partial<HeartbeatRun>): HeartbeatRun {
   return {
@@ -343,4 +347,313 @@ describe("deterministic steward governed proposals", () => {
       ).toBeNull();
     },
   );
+});
+
+function fakeContext(api: {
+  get: ReturnType<typeof vi.fn>;
+  post: ReturnType<typeof vi.fn>;
+  patch: ReturnType<typeof vi.fn>;
+}): ResolvedClientContext {
+  return {
+    api,
+    companyId: "company",
+    profileName: "test",
+    profile: { apiBase: "http://paperclip.test" },
+    json: true,
+    authSource: "explicit",
+  } as unknown as ResolvedClientContext;
+}
+
+function approvedInteraction(
+  proposals: StewardAttentionCase[],
+): import("@paperclipai/shared").IssueThreadInteraction {
+  return {
+    id: "interaction-review",
+    issueId: "attention-issue",
+    kind: "request_item_verdicts",
+    status: "answered",
+    idempotencyKey: "factory-recovery-attention:v2:review",
+    result: {
+      items: proposals.map((proposal) => ({
+        id: `steward:${proposal.issueId}:${proposal.proposalFingerprint.slice(0, 40)}`,
+        verdict: "approve",
+      })),
+    },
+  } as unknown as import("@paperclipai/shared").IssueThreadInteraction;
+}
+
+function completedProposalSource(identifier: string): {
+  issue: Issue;
+  run: HeartbeatRun;
+  proposal: StewardAttentionCase;
+} {
+  const sourceIssue = issue(identifier, {
+    executionState: {
+      status: "completed",
+      lastDecisionOutcome: "approved",
+    } as unknown as Issue["executionState"],
+  });
+  const sourceRun = run({
+    id: "22222222-2222-4222-8222-222222222222",
+    status: "succeeded",
+    resultJson: {
+      providerSettlement: {
+        state: "terminal",
+        runId: "22222222-2222-4222-8222-222222222222",
+        terminalStatus: "ok",
+        settledAt: "2026-10-09T06:59:00.000Z",
+      },
+    },
+  });
+  const proposal = deriveStewardAttentionCase(
+    inspection(identifier, { issue: sourceIssue, run: sourceRun }),
+  );
+  if (!proposal) throw new Error("Expected a governed proposal");
+  return { issue: sourceIssue, run: sourceRun, proposal };
+}
+
+describe("governed steward mutation path", () => {
+  it("creates the attention review without writing any source issue", async () => {
+    const proposal = attentionCase("AND-732");
+    const post = vi.fn(async (path: string) => ({
+      id: "new-interaction",
+      issueId: "attention-issue",
+      kind: "request_item_verdicts",
+      status: "pending",
+      idempotencyKey: "factory-recovery-attention:v2:new",
+    }));
+    const patch = vi.fn();
+    const ctx = fakeContext({ get: vi.fn(), post, patch });
+
+    const report = await applyStewardAttentionReview(ctx, {
+      companyId: "company",
+      attentionIssue: {
+        id: "attention-issue",
+        companyId: "company",
+        responsibleUserId: "andy-user",
+      } as Issue,
+      cases: [proposal],
+      existingHumanGates: [],
+      interactions: [],
+      apply: true,
+      scannedIssueCount: 1,
+      heldIssueCount: 1,
+    });
+
+    expect(report.action).toBe("notified");
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]?.[0]).toBe(
+      "/api/issues/attention-issue/interactions",
+    );
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("revalidates a matching approval and applies only the displayed recovery mutation", async () => {
+    const source = completedProposalSource("AND-663");
+    let currentIssue = source.issue;
+    const post = vi.fn(async (path: string, body: unknown) => {
+      expect(path).toBe(
+        `/api/issues/${source.issue.id}/recovery-actions/resolve`,
+      );
+      expect(body).toMatchObject({
+        actionId: source.proposal.recoveryActionId,
+        outcome: "restored",
+        sourceIssueStatus: "done",
+        continuationPolicy: "manual",
+        executionReconciliation: {
+          runId: source.run.id,
+          providerStopped: true,
+          providerAdmission: "terminal_receipt",
+          actionOutcome: "completed",
+        },
+      });
+      currentIssue = {
+        ...currentIssue,
+        status: "done",
+        executionBlocker: null,
+      };
+      return {
+        executionReconciliationResult: {
+          continuationDelivery: "not_required",
+        },
+      };
+    });
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/issues/attention-issue") {
+        return { id: "attention-issue", companyId: "company" } as Issue;
+      }
+      if (path === "/api/issues/attention-issue/interactions") {
+        return [approvedInteraction([source.proposal])];
+      }
+      if (path === `/api/issues/${source.issue.id}`) return currentIssue;
+      if (path === `/api/issues/${source.issue.id}/active-run`) return null;
+      if (path === `/api/issues/${source.issue.id}/interactions`) return [];
+      if (path === `/api/heartbeat-runs/${source.run.id}`) return source.run;
+      if (path.startsWith(`/api/issues/${source.issue.id}/comments?`)) return [];
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    const ctx = fakeContext({ get, post, patch: vi.fn() });
+
+    const report = await runStewardApplyDecisions(ctx, {
+      companyId: "company",
+      attentionIssueId: "attention-issue",
+      apply: true,
+      maxActions: 5,
+    });
+
+    expect(report.appliedCount).toBe(1);
+    expect(report.failedCount).toBe(0);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "fingerprint_changed",
+    "active_run",
+    "human_gate",
+    "conflicting_review",
+  ])("refuses %s without a source mutation", async (reason) => {
+    const source = completedProposalSource("AND-663");
+    let currentIssue = source.issue;
+    let activeRun: HeartbeatRun | null = null;
+    let interactions: import("@paperclipai/shared").IssueThreadInteraction[] = [];
+    let comments: IssueComment[] = [];
+    if (reason === "fingerprint_changed") {
+      currentIssue = {
+        ...currentIssue,
+        updatedAt: "2026-10-09T08:00:00.000Z",
+      };
+    } else if (reason === "active_run") {
+      activeRun = run({ id: "active-run", status: "running" });
+    } else if (reason === "human_gate") {
+      interactions = [
+        {
+          id: "human-gate",
+          status: "pending",
+          effectiveResolverPolicy: "human_only",
+        } as unknown as import("@paperclipai/shared").IssueThreadInteraction,
+      ];
+    } else {
+      currentIssue = {
+        ...currentIssue,
+        executionState: {
+          status: "changes_requested",
+          lastDecisionOutcome: "changes_requested",
+        } as unknown as Issue["executionState"],
+      };
+      comments = [
+        comment("Fixed and complete.", "2026-10-09T08:00:00.000Z"),
+        comment("Independent review changes requested.", "2026-10-09T08:01:00.000Z"),
+      ];
+    }
+    const post = vi.fn();
+    const patch = vi.fn();
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/issues/attention-issue") {
+        return { id: "attention-issue", companyId: "company" } as Issue;
+      }
+      if (path === "/api/issues/attention-issue/interactions") {
+        return [approvedInteraction([source.proposal])];
+      }
+      if (path === `/api/issues/${source.issue.id}`) return currentIssue;
+      if (path === `/api/issues/${source.issue.id}/active-run`) return activeRun;
+      if (path === `/api/issues/${source.issue.id}/interactions`) {
+        return interactions;
+      }
+      if (path === `/api/heartbeat-runs/${source.run.id}`) return source.run;
+      if (path.startsWith(`/api/issues/${source.issue.id}/comments?`)) {
+        return comments;
+      }
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    const ctx = fakeContext({ get, post, patch });
+
+    const report = await runStewardApplyDecisions(ctx, {
+      companyId: "company",
+      attentionIssueId: "attention-issue",
+      apply: true,
+      maxActions: 5,
+    });
+
+    expect(report.appliedCount).toBe(0);
+    expect(report.actions[0]?.action).toBe("skipped");
+    expect(post).not.toHaveBeenCalled();
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when recovery continuation or postconditions are not exact", async () => {
+    const source = completedProposalSource("AND-663");
+    const post = vi.fn(async () => ({
+      executionReconciliationResult: {
+        continuationDelivery: "pending",
+      },
+    }));
+    const ctx = fakeContext({ get: vi.fn(), post, patch: vi.fn() });
+
+    await expect(applyStewardProposal(ctx, source.proposal)).rejects.toThrow(
+      "continuationDelivery=pending",
+    );
+  });
+
+  it("enforces a hard five-mutation budget", async () => {
+    const sources = Array.from({ length: 6 }, (_, index) => {
+      const identifier = `AND-${900 + index}`;
+      const sourceIssue = issue(identifier, {
+        status: "blocked",
+        executionBlocker: null,
+        blockerAttention: {
+          state: "needs_attention",
+        } as Issue["blockerAttention"],
+      });
+      const proposal = deriveStewardAttentionCase(
+        inspection(identifier, {
+          issue: sourceIssue,
+          run: null,
+          classification: "blocked_state_requires_attention",
+        }),
+      );
+      if (!proposal) throw new Error("Expected bounded proposal");
+      return { issue: sourceIssue, proposal };
+    });
+    const currentIssues = new Map(
+      sources.map((source) => [source.issue.id, source.issue]),
+    );
+    const patch = vi.fn(async (path: string) => {
+      const issueId = path.split("/")[3]!;
+      const current = currentIssues.get(issueId)!;
+      currentIssues.set(issueId, { ...current, status: "todo" });
+      return currentIssues.get(issueId);
+    });
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/issues/attention-issue") {
+        return { id: "attention-issue", companyId: "company" } as Issue;
+      }
+      if (path === "/api/issues/attention-issue/interactions") {
+        return [approvedInteraction(sources.map((source) => source.proposal))];
+      }
+      const source = sources.find(({ issue: item }) =>
+        path.startsWith(`/api/issues/${item.id}`),
+      );
+      if (!source) throw new Error(`Unexpected GET ${path}`);
+      if (path === `/api/issues/${source.issue.id}`) {
+        return currentIssues.get(source.issue.id);
+      }
+      if (path === `/api/issues/${source.issue.id}/active-run`) return null;
+      if (path === `/api/issues/${source.issue.id}/interactions`) return [];
+      if (path.startsWith(`/api/issues/${source.issue.id}/comments?`)) return [];
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    const ctx = fakeContext({ get, post: vi.fn(), patch });
+
+    const report = await runStewardApplyDecisions(ctx, {
+      companyId: "company",
+      attentionIssueId: "attention-issue",
+      apply: true,
+      maxActions: 5,
+    });
+
+    expect(report.appliedCount).toBe(5);
+    expect(report.actions[5]?.action).toBe("skipped");
+    expect(report.actions[5]?.reason).toContain("5-mutation budget");
+    expect(patch).toHaveBeenCalledTimes(5);
+  });
 });
