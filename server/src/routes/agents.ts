@@ -1757,8 +1757,7 @@ export function agentRoutes(
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
-  async function assertBoardCanWakeAgent(req: Request, agent: { id: string; companyId: string }) {
-    assertBoard(req);
+  async function assertCanWakeAgent(req: Request, agent: { id: string; companyId: string }) {
     if (!hasCompanyAccess(req, agent.companyId)) throw notFound("Agent not found");
     assertCompanyAccess(req, agent.companyId);
     const decision = await access.decide({
@@ -5768,14 +5767,7 @@ export function agentRoutes(
     const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
 
-    if (req.actor.type === "agent") {
-      if (req.actor.agentId !== id) {
-        res.status(403).json({ error: "Agent can only invoke itself" });
-        return;
-      }
-    } else {
-      await assertBoardCanWakeAgent(req, agent);
-    }
+    await assertCanWakeAgent(req, agent);
     if (req.body.debug?.providerTrace === "raw") {
       assertInstanceAdmin(req);
     }
@@ -6019,14 +6011,7 @@ export function agentRoutes(
     const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
 
-    if (req.actor.type === "agent") {
-      if (req.actor.agentId !== id) {
-        res.status(403).json({ error: "Agent can only invoke itself" });
-        return;
-      }
-    } else {
-      await assertBoardCanWakeAgent(req, agent);
-    }
+    await assertCanWakeAgent(req, agent);
     const providerTraceRequested = req.body?.debug?.providerTrace === "raw";
     if (providerTraceRequested) {
       assertInstanceAdmin(req);

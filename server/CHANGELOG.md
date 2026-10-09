@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Allow agents with the explicit `agents:wake` permission to wake peer agents while preserving self-wake, company, key-scope, trust-boundary, and responsible-user checks.
 - Reconcile terminal evidence on already-completed issues without constructing or dispatching an invalid successor continuation.
 - Allow an explicitly granted, run-scoped agent to reconcile a settled execution while preserving issue access, ownership, trust, provider-settlement, conflict, and audit checks.
 - Allow board administrators to manage explicit permission grants for agent memberships through the existing member-permissions endpoint.

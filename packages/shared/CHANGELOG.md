@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Add an explicit peer-agent wake permission for controlled runtime coordination.
 - Add a scoped task execution-reconciliation permission for agent grants.
 
 ## 0.3.1

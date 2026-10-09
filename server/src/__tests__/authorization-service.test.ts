@@ -1495,6 +1495,48 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
+  it("requires an explicit agents:wake grant before an agent can wake a peer", async () => {
+    const company = await createCompany(db, "PeerWakeGrant");
+    const actorAgent = await createAgent(db, company.id, { role: "manager" });
+    const targetAgent = await createAgent(db, company.id, { role: "engineer" });
+    await db.insert(companyMemberships).values({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: actorAgent.id,
+      status: "active",
+      membershipRole: "member",
+    });
+    const authorization = authorizationService(db);
+    const input = {
+      actor: { type: "agent" as const, agentId: actorAgent.id, companyId: company.id, source: "agent_key" as const },
+      action: "agent:wake" as const,
+      resource: { type: "agent" as const, companyId: company.id, agentId: targetAgent.id },
+    };
+
+    await expect(authorization.decide(input)).resolves.toMatchObject({
+      allowed: false,
+      reason: "deny_missing_grant",
+    });
+
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: actorAgent.id,
+      permissionKey: "agents:wake",
+      scope: null,
+      grantedByUserId: null,
+    });
+    await expect(authorization.decide(input)).resolves.toMatchObject({
+      allowed: true,
+      reason: "allow_explicit_grant",
+      grant: { permissionKey: "agents:wake" },
+    });
+    await expect(authorization.decide({
+      ...input,
+      resource: { ...input.resource, agentId: actorAgent.id },
+    })).resolves.toMatchObject({ allowed: true, reason: "allow_self" });
+  });
+
   it("allows mentioned agents to read and comment on assigned issues without granting issue mutation", async () => {
     const company = await createCompany(db, "MentionCommentAuth");
     const allowedProject = await createProject(db, company.id, "MentionAllowed");
