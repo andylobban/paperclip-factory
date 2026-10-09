@@ -1909,6 +1909,48 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     },
   );
 
+  it("reconciles a stopped execution on an already-done issue without building a continuation", async () => {
+    const { sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(issues)
+      .set({ status: "done", completedAt: new Date() })
+      .where(eq(issues.id, sourceIssueId));
+    const app = createApp();
+
+    const response = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "done",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          actionOutcome: "completed",
+          outcomeEvidence:
+            "The exact provider receipt proves the already-completed issue's historical run finished without requiring a successor.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.issue).toMatchObject({
+      id: sourceIssueId,
+      status: "done",
+    });
+    expect(response.body.executionReconciliationResult).toEqual({
+      disposition: "accepted",
+      actionOutcome: "completed",
+      continuationDelivery: "not_required",
+      replayStarted: false,
+    });
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    const detail = await request(app)
+      .get(`/api/issues/${sourceIssueId}`)
+      .expect(200);
+    expect(detail.body.executionBlocker).toBeNull();
+  });
+
   it("returns an idempotent receipt for identical evidence and rejects differing evidence without side effects", async () => {
     const { sourceIssueId, runId, action } = await seedAutomaticNoReplayHold();
     const app = createApp();
