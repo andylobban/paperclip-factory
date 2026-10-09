@@ -594,6 +594,64 @@ describe("governed steward mutation path", () => {
     );
   });
 
+  it.each([
+    "wrong_target_status",
+    "retained_execution_blocker",
+    "new_active_run",
+  ])("reports %s as a failed mutation", async (failure) => {
+    const source = completedProposalSource("AND-663");
+    let currentIssue = source.issue;
+    let activeRunReads = 0;
+    const post = vi.fn(async () => {
+      currentIssue = {
+        ...currentIssue,
+        status: failure === "wrong_target_status" ? "todo" : "done",
+        executionBlocker:
+          failure === "retained_execution_blocker"
+            ? currentIssue.executionBlocker
+            : null,
+      };
+      return {
+        executionReconciliationResult: {
+          continuationDelivery: "not_required",
+        },
+      };
+    });
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/issues/attention-issue") {
+        return { id: "attention-issue", companyId: "company" } as Issue;
+      }
+      if (path === "/api/issues/attention-issue/interactions") {
+        return [approvedInteraction([source.proposal])];
+      }
+      if (path === `/api/issues/${source.issue.id}`) return currentIssue;
+      if (path === `/api/issues/${source.issue.id}/active-run`) {
+        activeRunReads += 1;
+        return failure === "new_active_run" && activeRunReads > 1
+          ? run({ id: "unexpected-run", status: "queued" })
+          : null;
+      }
+      if (path === `/api/issues/${source.issue.id}/interactions`) return [];
+      if (path === `/api/heartbeat-runs/${source.run.id}`) return source.run;
+      if (path.startsWith(`/api/issues/${source.issue.id}/comments?`)) return [];
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    const ctx = fakeContext({ get, post, patch: vi.fn() });
+
+    const report = await runStewardApplyDecisions(ctx, {
+      companyId: "company",
+      attentionIssueId: "attention-issue",
+      apply: true,
+      maxActions: 5,
+    });
+
+    expect(report.appliedCount).toBe(0);
+    expect(report.failedCount).toBe(1);
+    expect(report.actions[0]?.action).toBe("failed");
+    expect(report.actions[0]?.reason).toContain("Postcondition failed");
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
   it("enforces a hard five-mutation budget", async () => {
     const sources = Array.from({ length: 6 }, (_, index) => {
       const identifier = `AND-${900 + index}`;
