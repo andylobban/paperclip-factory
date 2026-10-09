@@ -154,6 +154,7 @@ interface IssueRecoveryResolveOptions extends BaseClientOptions {
   providerAdmission?: string;
   actionOutcome?: string;
   outcomeEvidence?: string;
+  deferContinuation?: boolean;
 }
 
 interface InteractionAcceptOptions extends BaseClientOptions {
@@ -539,6 +540,10 @@ export function registerIssueCommands(program: Command): void {
       .option("--provider-admission <mode>", "terminal_receipt or verified_not_admitted")
       .option("--action-outcome <outcome>", "completed, not_performed, or mixed")
       .option("--outcome-evidence <text>", "Evidence supporting the recorded action outcome")
+      .option(
+        "--defer-continuation",
+        "Record the reconciliation without automatically dispatching successor work",
+      )
       .action(async (issueId: string, opts: IssueRecoveryResolveOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
@@ -546,6 +551,7 @@ export function registerIssueCommands(program: Command): void {
             actionId: opts.actionId,
             outcome: opts.outcome,
             sourceIssueStatus: opts.sourceIssueStatus,
+            continuationPolicy: opts.deferContinuation ? "manual" : "automatic",
             resolutionNote: opts.resolutionNote,
             ...(opts.executionRunId || opts.providerStopped || opts.providerAdmission || opts.actionOutcome || opts.outcomeEvidence
               ? { executionReconciliation: {

@@ -150,8 +150,10 @@ describe("issue subresource commands", () => {
       "--provider-admission", "verified_not_admitted",
       "--action-outcome", "not_performed",
       "--outcome-evidence", "Provider log confirms no action was submitted before the stop.",
+      "--defer-continuation",
     ]);
     expect(JSON.parse(String(fetchMock.mock.calls[11]?.[1]?.body))).toMatchObject({
+      continuationPolicy: "manual",
       executionReconciliation: {
         runId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         providerStopped: true,
