@@ -9531,6 +9531,7 @@ export function issueRoutes(
               activeRecoveryAction.evidence.runId ??
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
+            continuationRequired: sourceIssueStatus === "todo",
           });
         } else if (executionReconciliation) {
           throw conflict(

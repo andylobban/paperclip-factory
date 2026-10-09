@@ -121,6 +121,7 @@ export async function validateExecutionReconciliation(input: {
   agentId: string | null;
   sourceRunId: unknown;
   decision: ExecutionReconciliation | undefined;
+  continuationRequired?: boolean;
 }) {
   const { db, companyId, issueId, agentId, decision } = input;
   if (!decision || decision.runId !== input.sourceRunId || !agentId) {
@@ -251,15 +252,17 @@ export async function validateExecutionReconciliation(input: {
     throw conflict(
       "The previous execution environment has not finished releasing its authority.",
     );
-  await buildExecutionContinuation({
-    db,
-    companyId,
-    issueId,
-    agentId,
-    context: { previousRunId: run.id },
-    summary: null,
-    exposeLowTrustRaw: false,
-  });
+  if (input.continuationRequired !== false) {
+    await buildExecutionContinuation({
+      db,
+      companyId,
+      issueId,
+      agentId,
+      context: { previousRunId: run.id },
+      summary: null,
+      exposeLowTrustRaw: false,
+    });
+  }
   return run;
 }
 
