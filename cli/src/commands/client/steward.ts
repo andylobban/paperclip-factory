@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { Command } from "commander";
 import type {
+  CreateIssueThreadInteraction,
   HeartbeatRun,
   Issue,
   IssueThreadInteraction,
@@ -43,6 +45,11 @@ interface StewardReconcileOptions extends BaseClientOptions {
   identifiers?: string;
 }
 
+interface StewardAttentionOptions extends BaseClientOptions {
+  apply?: boolean;
+  attentionIssue: string;
+}
+
 interface StewardReconcileAction {
   identifier: string;
   issueId: string;
@@ -67,6 +74,57 @@ interface StewardReconcileReport {
   failedCount: number;
   actions: StewardReconcileAction[];
 }
+
+export interface StewardAttentionCase {
+  identifier: string;
+  issueId: string;
+  title: string;
+  status: string;
+  classification:
+    | "terminal_receipt_requires_judgement"
+    | "unsettled_requires_judgement"
+    | "invalid_hold"
+    | "blocked_state_requires_attention"
+    | "review_state_requires_attention";
+  reason: string;
+  runId: string | null;
+  recoveryActionId: string | null;
+  updatedAt: string;
+}
+
+interface StewardAttentionReport {
+  schema: "paperclip.steward_attention.v1";
+  mode: "dry_run" | "apply";
+  companyId: string;
+  scannedAt: string;
+  scannedIssueCount: number;
+  heldIssueCount: number;
+  attentionCaseCount: number;
+  humanGateCount: number;
+  fingerprint: string | null;
+  interactionId: string | null;
+  action:
+    | "none"
+    | "would_notify"
+    | "notified"
+    | "pending_unchanged"
+    | "acknowledged_unchanged"
+    | "would_clear"
+    | "cleared"
+    | "failed";
+  supersededInteractionIds: string[];
+  reason: string;
+  cases: StewardAttentionCase[];
+}
+
+const ATTENTION_IDEMPOTENCY_PREFIX = "factory-recovery-attention:v1:";
+const ATTENTION_CLASSIFICATIONS = new Set<
+  StewardReconciliationInspection["classification"]
+>([
+  "terminal_receipt_requires_judgement",
+  "unsettled_requires_judgement",
+  "invalid_hold",
+]);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -134,6 +192,176 @@ function selectedIdentifiers(value: string | undefined): Set<string> | null {
     .filter(Boolean);
   if (identifiers.length === 0) return null;
   return new Set(identifiers);
+}
+
+function attentionCase(
+  inspection: StewardReconciliationInspection,
+): StewardAttentionCase | null {
+  if (!ATTENTION_CLASSIFICATIONS.has(inspection.classification)) return null;
+  return {
+    identifier: inspection.issue.identifier ?? inspection.issue.id,
+    issueId: inspection.issue.id,
+    title: inspection.issue.title,
+    status: inspection.issue.status,
+    classification:
+      inspection.classification as StewardAttentionCase["classification"],
+    reason: inspection.reason,
+    runId: inspection.run?.id ?? inspection.issue.executionBlocker?.runId ?? null,
+    recoveryActionId:
+      inspection.issue.executionBlocker?.recoveryActionId ?? null,
+    updatedAt: String(inspection.issue.updatedAt),
+  };
+}
+
+async function uncoveredBoardAttentionCase(
+  ctx: ResolvedClientContext,
+  issue: Issue,
+): Promise<{ item: StewardAttentionCase | null; humanGate: boolean }> {
+  const blockerNeedsAttention =
+    issue.status === "blocked" &&
+    issue.blockerAttention?.state === "needs_attention";
+  const reviewNeedsAttention =
+    issue.status === "in_review" && issue.reviewAttention?.state === "stalled";
+  if (!blockerNeedsAttention && !reviewNeedsAttention) {
+    return { item: null, humanGate: false };
+  }
+
+  const [freshIssue, activeRun, interactions] = await Promise.all([
+    ctx.api.get<Issue>(apiPath`/api/issues/${issue.id}`),
+    ctx.api.get<HeartbeatRun | null>(apiPath`/api/issues/${issue.id}/active-run`),
+    ctx.api.get<IssueThreadInteraction[]>(
+      apiPath`/api/issues/${issue.id}/interactions`,
+    ),
+  ]);
+  const presentIssue = requireResponse(freshIssue, `issue ${issue.id}`);
+  if (presentIssue.executionBlocker) {
+    return { item: null, humanGate: false };
+  }
+  const freshBlockerNeedsAttention =
+    presentIssue.status === "blocked" &&
+    presentIssue.blockerAttention?.state === "needs_attention";
+  const freshReviewNeedsAttention =
+    presentIssue.status === "in_review" &&
+    presentIssue.reviewAttention?.state === "stalled";
+  if (!freshBlockerNeedsAttention && !freshReviewNeedsAttention) {
+    return { item: null, humanGate: false };
+  }
+  const hasPendingHuman = (interactions ?? []).some(isPendingHumanInteraction);
+  if (hasPendingHuman) return { item: null, humanGate: true };
+  if (activeRun && ["queued", "running"].includes(activeRun.status)) {
+    return { item: null, humanGate: false };
+  }
+
+  const classification = freshBlockerNeedsAttention
+    ? "blocked_state_requires_attention"
+    : "review_state_requires_attention";
+  return {
+    item: {
+      identifier: presentIssue.identifier ?? presentIssue.id,
+      issueId: presentIssue.id,
+      title: presentIssue.title,
+      status: presentIssue.status,
+      classification,
+      reason: freshBlockerNeedsAttention
+        ? "Paperclip marks this blocked state as needing attention, with no active run or pending human-only interaction covering it."
+        : "Paperclip marks this review state as needing attention, with no active run or pending human-only interaction covering it.",
+      runId: null,
+      recoveryActionId: null,
+      updatedAt: String(presentIssue.updatedAt),
+    },
+    humanGate: false,
+  };
+}
+
+export function stewardAttentionFingerprint(
+  cases: StewardAttentionCase[],
+): string | null {
+  if (cases.length === 0) return null;
+  const canonical = [...cases]
+    .sort((a, b) => a.identifier.localeCompare(b.identifier))
+    .map((item) => ({
+      issueId: item.issueId,
+      status: item.status,
+      classification: item.classification,
+      runId: item.runId,
+      recoveryActionId: item.recoveryActionId,
+      updatedAt: item.updatedAt,
+    }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function classificationLabel(
+  classification: StewardAttentionCase["classification"],
+): string {
+  if (classification === "terminal_receipt_requires_judgement") {
+    return "terminal provider receipt; task outcome needs judgement";
+  }
+  if (classification === "unsettled_requires_judgement") {
+    return "provider outcome is ambiguous or unsettled";
+  }
+  if (classification === "blocked_state_requires_attention") {
+    return "blocked state has no maintained action path";
+  }
+  if (classification === "review_state_requires_attention") {
+    return "review state has no maintained action path";
+  }
+  return "execution hold is structurally incomplete";
+}
+
+function issueHref(item: StewardAttentionCase): string {
+  const companyKey = item.identifier.includes("-")
+    ? item.identifier.split("-", 1)[0]
+    : null;
+  return companyKey
+    ? `/${encodeURIComponent(companyKey)}/issues/${encodeURIComponent(item.identifier)}`
+    : `/issues/${encodeURIComponent(item.issueId)}`;
+}
+
+export function buildStewardAttentionInteraction(
+  attentionIssue: Issue,
+  cases: StewardAttentionCase[],
+  fingerprint: string,
+  humanGateCount: number,
+): CreateIssueThreadInteraction {
+  const sorted = [...cases].sort((a, b) =>
+    a.identifier.localeCompare(b.identifier),
+  );
+  const details = [
+    "These issues remain fenced because the control plane cannot safely infer the task outcome. Review the linked record and choose its explicit recovery disposition; acknowledgement of this digest does not change any source issue.",
+    "",
+    ...sorted.map(
+      (item) =>
+        `- [${item.identifier}](${issueHref(item)}) · **${item.status}** · ${classificationLabel(item.classification)} · ${item.title}`,
+    ),
+    ...(humanGateCount > 0
+      ? [
+          "",
+          `${humanGateCount} additional issue${humanGateCount === 1 ? " has" : "s have"} an existing pending human-only interaction and ${humanGateCount === 1 ? "is" : "are"} not duplicated here.`,
+        ]
+      : []),
+  ].join("\n");
+  return {
+    kind: "request_confirmation",
+    idempotencyKey: `${ATTENTION_IDEMPOTENCY_PREFIX}${fingerprint}`,
+    title: `Recovery attention: ${cases.length} fenced case${cases.length === 1 ? "" : "s"}`,
+    summary:
+      "A deterministic board scan found recovery holds that require operator judgement. No work was replayed and no gate was weakened.",
+    resolverPolicy: "human_only",
+    continuationPolicy: "none",
+    ...(attentionIssue.responsibleUserId
+      ? { addresseeUserId: attentionIssue.responsibleUserId }
+      : {}),
+    payload: {
+      version: 1,
+      prompt: `Review ${cases.length} fenced recovery case${cases.length === 1 ? "" : "s"}, then acknowledge this digest.`,
+      acceptLabel: "Acknowledge",
+      rejectLabel: "Dismiss",
+      rejectRequiresReason: false,
+      allowDeclineReason: false,
+      detailsMarkdown: details,
+      supersedeOnUserComment: false,
+    },
+  };
 }
 
 function isPendingHumanInteraction(interaction: IssueThreadInteraction): boolean {
@@ -280,6 +508,18 @@ async function listOpenIssues(
       `${apiPath`/api/companies/${companyId}/issues`}?${params.toString()}`,
     )) ?? [];
   return issues.filter((issue) => OPEN_STATUSES.has(issue.status));
+}
+
+async function withdrawAttentionInteraction(
+  ctx: ResolvedClientContext,
+  attentionIssueId: string,
+  interactionId: string,
+  reason: string,
+): Promise<void> {
+  await ctx.api.post(
+    apiPath`/api/issues/${attentionIssueId}/interactions/${interactionId}/reject`,
+    { reason },
+  );
 }
 
 export function registerStewardCommands(program: Command): void {
@@ -431,6 +671,190 @@ export function registerStewardCommands(program: Command): void {
           };
           printOutput(report, { json: ctx.json });
           if (report.failedCount > 0) process.exitCode = 1;
+        } catch (error) {
+          handleCommandError(error);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    steward
+      .command("attention")
+      .description(
+        "Create one de-duplicated human digest for fenced recovery cases that require outcome judgement",
+      )
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .requiredOption(
+        "--attention-issue <id>",
+        "Stable open issue used to host the operator digest",
+      )
+      .option("--apply", "Create or retire the digest; default is dry-run")
+      .action(async (opts: StewardAttentionOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const companyId = ctx.companyId!;
+          const [openIssues, attentionIssue] = await Promise.all([
+            listOpenIssues(ctx, companyId),
+            ctx.api.get<Issue>(apiPath`/api/issues/${opts.attentionIssue}`),
+          ]);
+          const presentAttentionIssue = requireResponse(
+            attentionIssue,
+            `attention issue ${opts.attentionIssue}`,
+          );
+          if (presentAttentionIssue.companyId !== companyId) {
+            throw new Error("The attention issue belongs to a different company.");
+          }
+          if (["done", "cancelled"].includes(presentAttentionIssue.status)) {
+            throw new Error("The attention issue must remain open.");
+          }
+
+          const inspections: StewardReconciliationInspection[] = [];
+          for (const issue of openIssues) {
+            if (issue.id === presentAttentionIssue.id) continue;
+            const inspection = await inspectHeldIssue(ctx, issue.id);
+            if (inspection) inspections.push(inspection);
+          }
+          const cases = inspections
+            .map(attentionCase)
+            .filter((item): item is StewardAttentionCase => item !== null);
+          let humanGateCount = inspections.filter(
+            (inspection) => inspection.classification === "human_gate",
+          ).length;
+          const inspectedIssueIds = new Set(
+            inspections.map((inspection) => inspection.issue.id),
+          );
+          for (const issue of openIssues) {
+            if (
+              issue.id === presentAttentionIssue.id ||
+              inspectedIssueIds.has(issue.id)
+            ) {
+              continue;
+            }
+            const uncovered = await uncoveredBoardAttentionCase(ctx, issue);
+            if (uncovered.item) cases.push(uncovered.item);
+            if (uncovered.humanGate) humanGateCount += 1;
+          }
+          cases.sort((a, b) => a.identifier.localeCompare(b.identifier));
+          const fingerprint = stewardAttentionFingerprint(cases);
+          const interactions =
+            (await ctx.api.get<IssueThreadInteraction[]>(
+              apiPath`/api/issues/${presentAttentionIssue.id}/interactions`,
+            )) ?? [];
+          const ownedInteractions = interactions.filter((interaction) =>
+            interaction.idempotencyKey?.startsWith(
+              ATTENTION_IDEMPOTENCY_PREFIX,
+            ),
+          );
+          const currentKey = fingerprint
+            ? `${ATTENTION_IDEMPOTENCY_PREFIX}${fingerprint}`
+            : null;
+          const current = currentKey
+            ? ownedInteractions.find(
+                (interaction) => interaction.idempotencyKey === currentKey,
+              ) ?? null
+            : null;
+          const stalePending = ownedInteractions.filter(
+            (interaction) =>
+              interaction.status === "pending" &&
+              interaction.idempotencyKey !== currentKey,
+          );
+
+          const report: StewardAttentionReport = {
+            schema: "paperclip.steward_attention.v1",
+            mode: opts.apply ? "apply" : "dry_run",
+            companyId,
+            scannedAt: new Date().toISOString(),
+            scannedIssueCount: openIssues.length,
+            heldIssueCount: inspections.length,
+            attentionCaseCount: cases.length,
+            humanGateCount,
+            fingerprint,
+            interactionId: current?.id ?? null,
+            action: "none",
+            supersededInteractionIds: [],
+            reason: "No operator digest is required.",
+            cases,
+          };
+
+          if (cases.length === 0) {
+            if (stalePending.length === 0) {
+              report.reason = "No judgement cases or stale pending digest exist.";
+            } else if (!opts.apply) {
+              report.action = "would_clear";
+              report.reason = `${stalePending.length} stale pending digest interaction(s) would be withdrawn.`;
+            } else {
+              for (const interaction of stalePending) {
+                await withdrawAttentionInteraction(
+                  ctx,
+                  presentAttentionIssue.id,
+                  interaction.id,
+                  "No fenced recovery case currently requires judgement.",
+                );
+                report.supersededInteractionIds.push(interaction.id);
+              }
+              report.action = "cleared";
+              report.reason =
+                "Stale digest withdrawn because no judgement cases remain.";
+            }
+          } else if (current) {
+            if (opts.apply) {
+              for (const interaction of stalePending) {
+                await withdrawAttentionInteraction(
+                  ctx,
+                  presentAttentionIssue.id,
+                  interaction.id,
+                  "Superseded by the current deterministic recovery-attention digest.",
+                );
+                report.supersededInteractionIds.push(interaction.id);
+              }
+            }
+            report.action =
+              current.status === "pending"
+                ? "pending_unchanged"
+                : "acknowledged_unchanged";
+            report.reason =
+              current.status === "pending"
+                ? "The current digest is already pending; no duplicate was created."
+                : "The current digest was already acknowledged; unchanged cases remain suppressed.";
+          } else if (!opts.apply) {
+            report.action = "would_notify";
+            report.reason = "A changed recovery-case set would create one human-only digest.";
+          } else {
+            try {
+              const created = requireResponse(
+                await ctx.api.post<IssueThreadInteraction>(
+                  apiPath`/api/issues/${presentAttentionIssue.id}/interactions`,
+                  buildStewardAttentionInteraction(
+                    presentAttentionIssue,
+                    cases,
+                    fingerprint!,
+                    humanGateCount,
+                  ),
+                ),
+                "steward attention interaction",
+              );
+              report.interactionId = created.id;
+              for (const interaction of stalePending) {
+                await withdrawAttentionInteraction(
+                  ctx,
+                  presentAttentionIssue.id,
+                  interaction.id,
+                  "Superseded by a changed deterministic recovery-attention digest.",
+                );
+                report.supersededInteractionIds.push(interaction.id);
+              }
+              report.action = "notified";
+              report.reason =
+                "Created one human-only digest; source issues and recovery gates were not changed.";
+            } catch (error) {
+              report.action = "failed";
+              report.reason = error instanceof Error ? error.message : String(error);
+            }
+          }
+
+          printOutput(report, { json: ctx.json });
+          if (report.action === "failed") process.exitCode = 1;
         } catch (error) {
           handleCommandError(error);
         }
