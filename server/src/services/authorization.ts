@@ -1009,13 +1009,29 @@ export function authorizationService(db: Db | DbTransaction) {
       );
     }
 
-    if (input.action === "agent:read" || input.action === "agent:wake") {
+    if (input.action === "agent:read") {
       if (input.resource.type !== "agent") {
         return lowTrustDeny("Low-trust agent action is missing an agent resource.");
       }
       return agentWithinLowTrustBoundary(boundary, input.actorAgentId, input.resource.agentId)
         ? lowTrustAllow("Allowed inside the low-trust agent boundary.")
         : lowTrustDeny("Agent is outside this low-trust boundary.");
+    }
+
+    if (input.action === "agent:wake") {
+      if (input.resource.type !== "agent") {
+        return lowTrustDeny("Low-trust agent wake is missing an agent resource.");
+      }
+      if (input.resource.agentId === input.actorAgentId) {
+        return lowTrustAllow("Allowed to wake itself inside the low-trust agent boundary.");
+      }
+      if (!agentWithinLowTrustBoundary(boundary, input.actorAgentId, input.resource.agentId)) {
+        return lowTrustDeny("Agent is outside this low-trust boundary.");
+      }
+      // A low-trust boundary may expose peer agents for coordination, but it
+      // does not itself grant the active authority to start their runtimes.
+      // Continue to the explicit agents:wake permission check below.
+      return null;
     }
 
     if (input.action === "project:read") {
@@ -2138,6 +2154,17 @@ export function authorizationService(db: Db | DbTransaction) {
         action: input.action,
         reason: "allow_self",
         explanation: "Allowed because the actor is waking itself.",
+      });
+    }
+
+    if (input.action === "agent:wake") {
+      return decidePrincipalGrant({
+        companyId,
+        principalType: "agent",
+        principalId: actorAgentId,
+        action: input.action,
+        permissionKey: "agents:wake",
+        scope: input.scope,
       });
     }
 

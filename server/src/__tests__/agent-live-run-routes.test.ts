@@ -966,6 +966,40 @@ describe("agent live run routes", () => {
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(routeAgentId, expect.objectContaining({ manualUserWake: true }));
   });
 
+  it.each(["wakeup", "heartbeat/invoke"])("lets an explicitly authorised agent wake a peer via %s", async (endpoint) => {
+    const actorAgentId = "55555555-5555-4555-8555-555555555555";
+    const res = await requestApp(await createApp(undefined, {
+      type: "agent", agentId: actorAgentId, companyId: "company-1", source: "agent_key",
+    }), url => request(url).post(`/api/agents/${routeAgentId}/${endpoint}`).send({}));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(202);
+    expect(mockAccessService.decide).toHaveBeenCalledWith({
+      actor: expect.objectContaining({ type: "agent", agentId: actorAgentId }),
+      action: "agent:wake",
+      resource: { type: "agent", companyId: "company-1", agentId: "agent-1" },
+    });
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(routeAgentId, expect.objectContaining({
+      requestedByActorType: "agent",
+      requestedByActorId: actorAgentId,
+    }));
+  }, 30_000);
+
+  it.each(["wakeup", "heartbeat/invoke"])("rejects an agent peer wake without the explicit grant via %s", async (endpoint) => {
+    mockAccessService.decide.mockResolvedValue({
+      allowed: false,
+      action: "agent:wake",
+      reason: "deny_missing_grant",
+      explanation: "Missing permission: agents:wake.",
+    });
+    const res = await requestApp(await createApp(undefined, {
+      type: "agent", agentId: "55555555-5555-4555-8555-555555555555", companyId: "company-1", source: "agent_key",
+    }), url => request(url).post(`/api/agents/${routeAgentId}/${endpoint}`).send({}));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Missing permission: agents:wake.");
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  }, 30_000);
+
   describe("exact failed chat run retry", () => {
     const retryBody = {
       failedRunId: failedChatRunId,
