@@ -62,6 +62,7 @@ export function requiresExecutionReconciliation(
 export interface ExecutionReconciliation {
   runId: string;
   providerStopped: true;
+  providerAdmission?: "terminal_receipt" | "verified_not_admitted";
   actionOutcome: "completed" | "not_performed" | "mixed";
   outcomeEvidence: string;
 }

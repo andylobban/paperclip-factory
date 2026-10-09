@@ -599,6 +599,12 @@ describe("openclaw gateway adapter execute", () => {
       expect(String(payload?.message ?? "")).toContain("wake now");
       expect(String(payload?.message ?? "")).toContain("PAPERCLIP_RUN_ID=run-123");
       expect(String(payload?.message ?? "")).toContain("PAPERCLIP_TASK_ID=task-123");
+      expect(String(payload?.message ?? "")).toContain(
+        "only from the host-local bash/terminal tool",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "Do not use gateway_exec, node_exec",
+      );
       expect(String(payload?.message ?? "")).toContain("## Paperclip Wake Payload");
       expect(String(payload?.message ?? "")).toContain(
         "Use this wake to continue the task, applying new user direction and preserving its approval gates.",
