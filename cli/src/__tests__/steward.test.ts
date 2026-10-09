@@ -520,7 +520,7 @@ describe("governed steward mutation path", () => {
     if (reason === "fingerprint_changed") {
       currentIssue = {
         ...currentIssue,
-        updatedAt: "2026-10-09T08:00:00.000Z",
+        updatedAt: new Date("2026-10-09T08:00:00.000Z"),
       };
     } else if (reason === "active_run") {
       activeRun = run({ id: "active-run", status: "running" });
