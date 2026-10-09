@@ -1,5 +1,11 @@
 # @paperclipai/adapter-openclaw-gateway
 
+## Unreleased
+
+### Patch Changes
+
+- Preserve one authoritative `agent.wait` request until OpenClaw supplies a terminal receipt, while continuing to enforce Paperclip's local idle and cancellation deadlines.
+
 ## 0.3.1
 
 ### Patch Changes
