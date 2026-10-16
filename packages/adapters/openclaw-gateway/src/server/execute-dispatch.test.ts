@@ -8,6 +8,7 @@ const websocketState = vi.hoisted(() => ({
   connectionAttempts: 0,
   failConnectAttempts: 0,
   failAgentRequests: 0,
+  agentResponseDelayMs: 0,
   events: [] as string[],
   messages: [] as string[],
 }));
@@ -54,14 +55,19 @@ vi.mock("ws", async () => {
       const responsePayload = request.method === "connect"
         ? { protocol: 3 }
         : { status: "ok", runId: "remote-run-1", summary: "done" };
-      queueMicrotask(() => {
+      const respond = () => {
         this.emit("message", JSON.stringify({
           type: "res",
           id: request.id,
           ok: true,
           payload: responsePayload,
         }));
-      });
+      };
+      if (request.method === "agent" && websocketState.agentResponseDelayMs > 0) {
+        setTimeout(respond, websocketState.agentResponseDelayMs);
+      } else {
+        queueMicrotask(respond);
+      }
     }
 
     close() {}
@@ -114,6 +120,7 @@ describe("openclaw_gateway execute dispatch boundary", () => {
     websocketState.connectionAttempts = 0;
     websocketState.failConnectAttempts = 0;
     websocketState.failAgentRequests = 0;
+    websocketState.agentResponseDelayMs = 0;
     websocketState.events = [];
     websocketState.messages = [];
   });
@@ -202,6 +209,33 @@ describe("openclaw_gateway execute dispatch boundary", () => {
       "dispatch",
       "send:agent",
     ]);
+  });
+
+  it("keeps the run credential available while a dispatched agent acknowledgement is delayed", async () => {
+    websocketState.agentResponseDelayMs = 1_500;
+    const ctx = createContext();
+    ctx.config.queueTimeoutMs = 2_000;
+
+    const resultPromise = execute(ctx);
+    await vi.waitFor(() => {
+      expect(websocketState.messages).toHaveLength(1);
+    });
+
+    const credentialPath = websocketState.messages[0]!.match(
+      /single line in ([^\s]+\.key)/,
+    )?.[1];
+    expect(credentialPath).toBeTruthy();
+
+    // The connection handshake budget is one second in this fixture. The
+    // credential must remain leased after that point because remote work has
+    // already been dispatched and its acknowledgement is still in flight.
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    await expect(import("node:fs/promises").then(({ stat }) => stat(credentialPath!)))
+      .resolves.toBeTruthy();
+
+    await expect(resultPromise).resolves.toMatchObject({ exitCode: 0 });
+    await expect(import("node:fs/promises").then(({ stat }) => stat(credentialPath!)))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("retains the continuation gate through transient connection backoff", async () => {
