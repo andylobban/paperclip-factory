@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   buildAgentParams,
+  type GatewayRequestClient,
+  isArchivedSessionGatewayError,
   materializeRunCredentialFile,
+  requestAgentWithArchivedSessionRecovery,
   resolveClaimedApiKeyPath,
   resolveSessionKey,
 } from "./execute.js";
@@ -105,6 +108,174 @@ describe("buildAgentParams", () => {
       sessionKey: "paperclip",
       idempotencyKey: "run-123",
     });
+  });
+});
+
+describe("archived issue session recovery", () => {
+  const sessionKey = "agent:macgyver:paperclip:issue:issue-456";
+  const archivedError = () => Object.assign(
+    new Error(`Session "${sessionKey}" is archived. Restore it before starting new work.`),
+    { gatewayCode: "INVALID_REQUEST" },
+  );
+
+  it("recognizes only the exact archived-session rejection for the requested key", () => {
+    expect(isArchivedSessionGatewayError(archivedError(), sessionKey)).toBe(true);
+    expect(isArchivedSessionGatewayError(archivedError(), `${sessionKey}-other`)).toBe(false);
+    expect(
+      isArchivedSessionGatewayError(
+        Object.assign(archivedError(), { gatewayCode: "PERMISSION_DENIED" }),
+        sessionKey,
+      ),
+    ).toBe(false);
+  });
+
+  it("restores an archived issue session and retries the same dispatch once", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    let agentAttempts = 0;
+    const client: GatewayRequestClient = {
+      async request<T>(method: string, requestParams: unknown): Promise<T> {
+        calls.push({ method, params: requestParams });
+        if (method === "agent") {
+          agentAttempts += 1;
+          if (agentAttempts === 1) throw archivedError();
+          return { status: "accepted", runId: "provider-run" } as T;
+        }
+        if (method === "sessions.describe") {
+          return {
+            session: { key: sessionKey, sessionId: "session-789", archived: true },
+          } as T;
+        }
+        if (method === "sessions.patch") {
+          return { ok: true, entry: {} } as T;
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    };
+
+    const logs: string[] = [];
+    const result = await requestAgentWithArchivedSessionRecovery<Record<string, unknown>>({
+      client,
+      agentParams: { sessionKey, idempotencyKey: "run-123" },
+      agentId: "macgyver",
+      sessionKey,
+      timeoutMs: 10_000,
+      restoreArchivedIssueSession: true,
+      onLog: async (_stream, text) => {
+        logs.push(text);
+      },
+    });
+
+    expect(result).toEqual({ status: "accepted", runId: "provider-run" });
+    expect(calls).toEqual([
+      {
+        method: "agent",
+        params: { sessionKey, idempotencyKey: "run-123" },
+      },
+      {
+        method: "sessions.describe",
+        params: { key: sessionKey, agentId: "macgyver" },
+      },
+      {
+        method: "sessions.patch",
+        params: {
+          key: sessionKey,
+          agentId: "macgyver",
+          expectedSessionId: "session-789",
+          archived: false,
+        },
+      },
+      {
+        method: "agent",
+        params: { sessionKey, idempotencyKey: "run-123" },
+      },
+    ]);
+    expect(logs.join("\n")).toContain("restoring archived issue session");
+    expect(logs.join("\n")).toContain("retrying dispatch once");
+  });
+
+  it("does not restore archived sessions outside issue-scoped routing", async () => {
+    const calls: string[] = [];
+    const client: GatewayRequestClient = {
+      async request<T>(method: string): Promise<T> {
+        calls.push(method);
+        throw archivedError();
+      },
+    };
+
+    await expect(
+      requestAgentWithArchivedSessionRecovery({
+        client,
+        agentParams: { sessionKey },
+        sessionKey,
+        timeoutMs: 10_000,
+        restoreArchivedIssueSession: false,
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow("is archived");
+    expect(calls).toEqual(["agent"]);
+  });
+
+  it("fails closed when the archived session identity cannot be fenced", async () => {
+    const calls: string[] = [];
+    const client: GatewayRequestClient = {
+      async request<T>(method: string): Promise<T> {
+        calls.push(method);
+        if (method === "agent") throw archivedError();
+        if (method === "sessions.describe") {
+          return {
+            session: { key: sessionKey, sessionId: "session-789", archived: false },
+          } as T;
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    };
+
+    await expect(
+      requestAgentWithArchivedSessionRecovery({
+        client,
+        agentParams: { sessionKey },
+        agentId: "macgyver",
+        sessionKey,
+        timeoutMs: 10_000,
+        restoreArchivedIssueSession: true,
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow("did not describe the expected archived session");
+    expect(calls).toEqual(["agent", "sessions.describe"]);
+  });
+
+  it("does not retry dispatch when cancellation arrives during restoration", async () => {
+    const calls: string[] = [];
+    const controller = new AbortController();
+    const client: GatewayRequestClient = {
+      async request<T>(method: string): Promise<T> {
+        calls.push(method);
+        if (method === "agent") throw archivedError();
+        if (method === "sessions.describe") {
+          return {
+            session: { key: sessionKey, sessionId: "session-789", archived: true },
+          } as T;
+        }
+        if (method === "sessions.patch") {
+          controller.abort();
+          return { ok: true, entry: {} } as T;
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    };
+
+    await expect(
+      requestAgentWithArchivedSessionRecovery({
+        client,
+        agentParams: { sessionKey },
+        sessionKey,
+        timeoutMs: 10_000,
+        restoreArchivedIssueSession: true,
+        signal: controller.signal,
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow("Stopped after restoring archived OpenClaw session");
+    expect(calls).toEqual(["agent", "sessions.describe", "sessions.patch"]);
   });
 });
 

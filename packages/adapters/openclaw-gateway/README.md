@@ -43,6 +43,13 @@ The adapter supports the same session routing model as HTTP OpenClaw mode:
 
 Resolved session key is sent as `agent.sessionKey`.
 
+When `sessionKeyStrategy=issue`, an exact OpenClaw archived-session rejection is
+safe to recover before provider work starts. The adapter calls `sessions.patch`
+with `archived=false` after resolving and fencing the exact session ID through
+`sessions.describe`, verifies the archive flag was cleared, and retries the same
+idempotent `agent` request once. It does not auto-restore fixed or run-scoped
+sessions, and it does not retry any other gateway rejection.
+
 ## Payload Mapping
 
 The agent request is built as:

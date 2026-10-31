@@ -94,6 +94,14 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
+export type GatewayRequestClient = {
+  request<T>(
+    method: string,
+    params: unknown,
+    opts: GatewayClientRequestOptions,
+  ): Promise<T>;
+};
+
 type GatewayCancellation = {
   acknowledged: boolean;
   payload: Record<string, unknown> | null;
@@ -1000,6 +1008,91 @@ class GatewayWsClient {
   }
 }
 
+export function isArchivedSessionGatewayError(err: unknown, sessionKey: string): boolean {
+  if (!(err instanceof Error)) return false;
+  const gatewayCode = nonEmpty((err as GatewayResponseError).gatewayCode);
+  if (gatewayCode && gatewayCode !== "INVALID_REQUEST") return false;
+  return err.message === `Session "${sessionKey}" is archived. Restore it before starting new work.`;
+}
+
+export async function requestAgentWithArchivedSessionRecovery<T>(params: {
+  client: GatewayRequestClient;
+  agentParams: Record<string, unknown>;
+  agentId?: string | null;
+  sessionKey: string;
+  timeoutMs: number;
+  restoreArchivedIssueSession: boolean;
+  signal?: AbortSignal;
+  onLog: AdapterExecutionContext["onLog"];
+}): Promise<T> {
+  try {
+    return await params.client.request<T>("agent", params.agentParams, {
+      timeoutMs: params.timeoutMs,
+    });
+  } catch (err) {
+    if (
+      !params.restoreArchivedIssueSession ||
+      !isArchivedSessionGatewayError(err, params.sessionKey)
+    ) {
+      throw err;
+    }
+
+    if (params.signal?.aborted) throw err;
+
+    await params.onLog(
+      "stdout",
+      `[openclaw-gateway] restoring archived issue session ${params.sessionKey} before retrying dispatch\n`,
+    );
+
+    const described = await params.client.request<Record<string, unknown>>(
+      "sessions.describe",
+      {
+        key: params.sessionKey,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+      },
+      { timeoutMs: params.timeoutMs },
+    );
+    const describedSession = asRecord(described.session);
+    const describedKey = nonEmpty(describedSession?.key);
+    const expectedSessionId = nonEmpty(describedSession?.sessionId);
+    if (
+      describedKey !== params.sessionKey ||
+      !expectedSessionId ||
+      describedSession?.archived !== true
+    ) {
+      throw new Error(`OpenClaw did not describe the expected archived session "${params.sessionKey}"`);
+    }
+    if (params.signal?.aborted) throw err;
+
+    const restored = await params.client.request<Record<string, unknown>>(
+      "sessions.patch",
+      {
+        key: params.sessionKey,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        expectedSessionId,
+        archived: false,
+      },
+      { timeoutMs: params.timeoutMs },
+    );
+    const restoredEntry = asRecord(restored.entry);
+    if (restored.ok !== true || !restoredEntry || restoredEntry.archivedAt !== undefined) {
+      throw new Error(`OpenClaw did not confirm restoration of session "${params.sessionKey}"`);
+    }
+
+    if (params.signal?.aborted) {
+      throw new Error(`Stopped after restoring archived OpenClaw session "${params.sessionKey}"`);
+    }
+
+    await params.onLog(
+      "stdout",
+      `[openclaw-gateway] restored archived issue session ${params.sessionKey}; retrying dispatch once\n`,
+    );
+    return params.client.request<T>("agent", params.agentParams, {
+      timeoutMs: params.timeoutMs,
+    });
+  }
+}
+
 async function autoApproveDevicePairing(params: {
   url: string;
   headers: Record<string, string>;
@@ -1747,10 +1840,16 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       }
       const acceptedOutcome = await Promise.race([
-        client
-          .request<Record<string, unknown>>("agent", agentParams, {
-            timeoutMs: connectTimeoutMs,
-          })
+        requestAgentWithArchivedSessionRecovery<Record<string, unknown>>({
+          client,
+          agentParams,
+          agentId: configuredAgentId,
+          sessionKey,
+          timeoutMs: connectTimeoutMs,
+          restoreArchivedIssueSession: sessionKeyStrategy === "issue" && Boolean(wakePayload.issueId),
+          signal: ctx.signal,
+          onLog: ctx.onLog,
+        })
           .then((payload) => ({ kind: "accepted" as const, payload })),
         cancellationRequested.then(() => ({ kind: "cancelled" as const })),
       ]);
