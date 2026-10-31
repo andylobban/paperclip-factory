@@ -63,6 +63,14 @@ export interface ExecutionReconciliation {
   runId: string;
   providerStopped: true;
   providerAdmission?: "terminal_receipt" | "verified_not_admitted";
+  providerTerminalReceipt?: {
+    runId: string;
+    status: "ok" | "error" | "failed" | "cancelled" | "canceled" | "aborted";
+    startedAt?: number;
+    endedAt?: number;
+    error?: string;
+    summary?: string;
+  };
   actionOutcome: "completed" | "not_performed" | "mixed";
   outcomeEvidence: string;
 }

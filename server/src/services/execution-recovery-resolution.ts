@@ -62,12 +62,22 @@ export function persistedExecutionReconciliation(
   ) {
     return null;
   }
+  const receiptValue = record.providerTerminalReceipt;
+  const providerTerminalReceipt =
+    receiptValue &&
+    typeof receiptValue === "object" &&
+    !Array.isArray(receiptValue) &&
+    typeof (receiptValue as Record<string, unknown>).runId === "string" &&
+    typeof (receiptValue as Record<string, unknown>).status === "string"
+      ? (receiptValue as ExecutionReconciliation["providerTerminalReceipt"])
+      : undefined;
   return {
     runId: record.runId,
     providerStopped: true,
     ...(record.providerAdmission === "verified_not_admitted"
       ? { providerAdmission: "verified_not_admitted" as const }
       : {}),
+    ...(providerTerminalReceipt ? { providerTerminalReceipt } : {}),
     actionOutcome:
       record.actionOutcome as ExecutionReconciliation["actionOutcome"],
     outcomeEvidence: record.outcomeEvidence,
@@ -83,6 +93,8 @@ export function executionReconciliationMatches(
     persisted.providerStopped === submitted.providerStopped &&
     (persisted.providerAdmission ?? "terminal_receipt") ===
       (submitted.providerAdmission ?? "terminal_receipt") &&
+    JSON.stringify(persisted.providerTerminalReceipt ?? null) ===
+      JSON.stringify(submitted.providerTerminalReceipt ?? null) &&
     persisted.actionOutcome === submitted.actionOutcome &&
     persisted.outcomeEvidence === submitted.outcomeEvidence
   );
@@ -171,8 +183,45 @@ export async function validateExecutionReconciliation(input: {
   if (runAgent?.adapterType === "openclaw_gateway") {
     const providerAdmission =
       decision.providerAdmission ?? "terminal_receipt";
-    const settlement =
+    let settlement =
       run.resultJson?.providerSettlement as Record<string, unknown> | undefined;
+    const submittedReceipt = decision.providerTerminalReceipt;
+    if (submittedReceipt) {
+      if (
+        settlement &&
+        (settlement.runId !== submittedReceipt.runId ||
+          settlement.terminalStatus !== submittedReceipt.status)
+      ) {
+        throw conflict(
+          "The submitted OpenClaw terminal receipt conflicts with the settlement already recorded for this run.",
+          { code: "execution_provider_settlement_conflict", runId: run.id },
+        );
+      }
+      if (!settlement) {
+        settlement = {
+          state: "terminal",
+          runId: submittedReceipt.runId,
+          terminalStatus: submittedReceipt.status,
+          settledAt: new Date().toISOString(),
+          source: "operator_agent_wait",
+          receipt: submittedReceipt,
+        };
+        await db
+          .update(heartbeatRuns)
+          .set({
+            resultJson: {
+              ...(run.resultJson ?? {}),
+              providerSettlement: settlement,
+            },
+          })
+          .where(
+            and(
+              eq(heartbeatRuns.companyId, companyId),
+              eq(heartbeatRuns.id, run.id),
+            ),
+          );
+      }
+    }
     const settledAt =
       typeof settlement?.settledAt === "string"
         ? Date.parse(settlement.settledAt)

@@ -583,10 +583,50 @@ export const resolveIssueRecoveryActionSchema = z
         providerAdmission: z
           .enum(["terminal_receipt", "verified_not_admitted"])
           .optional(),
+        providerTerminalReceipt: z
+          .object({
+            runId: z.string().guid(),
+            status: z.enum([
+              "ok",
+              "error",
+              "failed",
+              "cancelled",
+              "canceled",
+              "aborted",
+            ]),
+            startedAt: z.number().int().nonnegative().optional(),
+            endedAt: z.number().int().nonnegative().optional(),
+            error: z.string().max(12000).optional(),
+            summary: z.string().max(12000).optional(),
+          })
+          .strict()
+          .optional(),
         actionOutcome: z.enum(["completed", "not_performed", "mixed"]),
         outcomeEvidence: z.string().trim().min(20).max(12000),
       })
       .strict()
+      .superRefine((value, ctx) => {
+        if (
+          value.providerTerminalReceipt &&
+          value.providerTerminalReceipt.runId !== value.runId
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Provider terminal receipt must name the reconciled run",
+            path: ["providerTerminalReceipt", "runId"],
+          });
+        }
+        if (
+          value.providerTerminalReceipt &&
+          value.providerAdmission === "verified_not_admitted"
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "A terminal receipt cannot be submitted as verified non-admission",
+            path: ["providerAdmission"],
+          });
+        }
+      })
       .optional(),
     actionId: z.string().guid().optional(),
     outcome: z.enum(RESOLVE_ISSUE_RECOVERY_ACTION_OUTCOMES),

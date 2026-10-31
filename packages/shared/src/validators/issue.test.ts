@@ -346,6 +346,47 @@ describe("issue validators", () => {
     ).toBe(false);
   });
 
+  it("binds a submitted OpenClaw terminal receipt to the reconciled run", () => {
+    const runId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    expect(
+      resolveIssueRecoveryActionSchema.parse({
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "terminal_receipt",
+          providerTerminalReceipt: {
+            runId,
+            status: "ok",
+            summary: "Observer completed without replay.",
+          },
+          actionOutcome: "completed",
+          outcomeEvidence:
+            "The exact agent.wait receipt confirms the provider run completed.",
+        },
+      }).executionReconciliation?.providerTerminalReceipt,
+    ).toMatchObject({ runId, status: "ok" });
+
+    expect(
+      resolveIssueRecoveryActionSchema.safeParse({
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerTerminalReceipt: {
+            runId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            status: "ok",
+          },
+          actionOutcome: "completed",
+          outcomeEvidence:
+            "This receipt belongs to a different provider run and must fail.",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("allows cancelled recovery resolutions to atomically restore the source issue status", () => {
     expect(
       resolveIssueRecoveryActionSchema.parse({

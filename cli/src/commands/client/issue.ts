@@ -152,6 +152,7 @@ interface IssueRecoveryResolveOptions extends BaseClientOptions {
   executionRunId?: string;
   providerStopped?: boolean;
   providerAdmission?: string;
+  providerTerminalReceiptJson?: string;
   actionOutcome?: string;
   outcomeEvidence?: string;
   deferContinuation?: boolean;
@@ -538,6 +539,10 @@ export function registerIssueCommands(program: Command): void {
       .option("--execution-run-id <id>", "Stopped provider run ID for execution reconciliation")
       .option("--provider-stopped", "Confirm that the provider process has stopped")
       .option("--provider-admission <mode>", "terminal_receipt or verified_not_admitted")
+      .option(
+        "--provider-terminal-receipt-json <json>",
+        "Exact terminal agent.wait receipt for the stopped OpenClaw run (board only)",
+      )
       .option("--action-outcome <outcome>", "completed, not_performed, or mixed")
       .option("--outcome-evidence <text>", "Evidence supporting the recorded action outcome")
       .option(
@@ -553,11 +558,14 @@ export function registerIssueCommands(program: Command): void {
             sourceIssueStatus: opts.sourceIssueStatus,
             continuationPolicy: opts.deferContinuation ? "manual" : "automatic",
             resolutionNote: opts.resolutionNote,
-            ...(opts.executionRunId || opts.providerStopped || opts.providerAdmission || opts.actionOutcome || opts.outcomeEvidence
+            ...(opts.executionRunId || opts.providerStopped || opts.providerAdmission || opts.providerTerminalReceiptJson || opts.actionOutcome || opts.outcomeEvidence
               ? { executionReconciliation: {
                 runId: opts.executionRunId,
                 providerStopped: opts.providerStopped,
                 providerAdmission: opts.providerAdmission,
+                providerTerminalReceipt: opts.providerTerminalReceiptJson
+                  ? parseJson(opts.providerTerminalReceiptJson)
+                  : undefined,
                 actionOutcome: opts.actionOutcome,
                 outcomeEvidence: opts.outcomeEvidence,
               } }

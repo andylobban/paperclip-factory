@@ -9390,6 +9390,9 @@ export function issueRoutes(
       if (executionReconciliation) {
         await assertExecutionReconciliationAuthority(req, existing);
       }
+      if (executionReconciliation?.providerTerminalReceipt) {
+        assertBoard(req);
+      }
       if (continuationPolicy === "manual") {
         assertBoard(req);
       }

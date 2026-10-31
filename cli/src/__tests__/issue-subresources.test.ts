@@ -209,6 +209,41 @@ describe("issue subresource commands", () => {
     expect(console.log).toHaveBeenCalledWith(JSON.stringify(receipt, null, 2));
   });
 
+  it("submits an exact terminal OpenClaw receipt for board reconciliation", async () => {
+    const runId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run([
+      "issue", "recovery:resolve", ISSUE_ID,
+      "--outcome", "restored",
+      "--source-issue-status", "todo",
+      "--action-id", APPROVAL_ID,
+      "--execution-run-id", runId,
+      "--provider-stopped",
+      "--provider-admission", "terminal_receipt",
+      "--provider-terminal-receipt-json", JSON.stringify({
+        runId,
+        status: "ok",
+        summary: "Observer completed without replay.",
+      }),
+      "--action-outcome", "completed",
+      "--outcome-evidence", "The exact terminal agent.wait receipt was captured from OpenClaw.",
+      "--defer-continuation",
+    ]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      executionReconciliation: {
+        runId,
+        providerAdmission: "terminal_receipt",
+        providerTerminalReceipt: {
+          runId,
+          status: "ok",
+        },
+      },
+    });
+  });
+
   it("wraps document and work product endpoints", async () => {
     const fetchMock = vi
       .fn()

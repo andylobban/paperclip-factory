@@ -2264,6 +2264,78 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     ).toBe("blocked");
   });
 
+  it("accepts an exact board-supplied terminal agent.wait receipt for a fenced OpenClaw run", async () => {
+    const { coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+
+    const receipt = {
+      runId,
+      status: "ok" as const,
+      summary: "The observer established the durable monitoring handoff.",
+    };
+    const body = {
+      actionId: action.id,
+      outcome: "restored",
+      sourceIssueStatus: "todo",
+      continuationPolicy: "manual",
+      executionReconciliation: {
+        runId,
+        providerStopped: true,
+        providerAdmission: "terminal_receipt",
+        providerTerminalReceipt: receipt,
+        actionOutcome: "completed",
+        outcomeEvidence:
+          "A board operator captured the exact terminal agent.wait receipt from OpenClaw.",
+      },
+    };
+    await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+
+    const repeated = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+    expect(repeated.body.executionReconciliationResult?.disposition).toBe(
+      "idempotent_repeat",
+    );
+
+    await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        ...body,
+        executionReconciliation: {
+          ...body.executionReconciliation,
+          providerTerminalReceipt: {
+            ...receipt,
+            summary: "A conflicting receipt must not be accepted later.",
+          },
+        },
+      })
+      .expect(409);
+
+    const [run] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(run?.resultJson?.providerSettlement).toMatchObject({
+      state: "terminal",
+      runId,
+      terminalStatus: "ok",
+      source: "operator_agent_wait",
+      receipt,
+    });
+    expect(
+      (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
+        ?.status,
+    ).toBe("todo");
+  });
+
   it.each([
     {
       name: "stale queued-run review gate",
