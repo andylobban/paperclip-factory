@@ -6,9 +6,10 @@ import path from "node:path";
 import {
   buildAgentParams,
   type GatewayRequestClient,
+  isAgentRequestTimeoutError,
   isArchivedSessionGatewayError,
   materializeRunCredentialFile,
-  requestAgentWithArchivedSessionRecovery,
+  requestAgentWithSafeDispatchRecovery,
   resolveClaimedApiKeyPath,
   resolveSessionKey,
 } from "./execute.js";
@@ -153,7 +154,7 @@ describe("archived issue session recovery", () => {
     };
 
     const logs: string[] = [];
-    const result = await requestAgentWithArchivedSessionRecovery<Record<string, unknown>>({
+    const result = await requestAgentWithSafeDispatchRecovery<Record<string, unknown>>({
       client,
       agentParams: { sessionKey, idempotencyKey: "run-123" },
       agentId: "macgyver",
@@ -203,7 +204,7 @@ describe("archived issue session recovery", () => {
     };
 
     await expect(
-      requestAgentWithArchivedSessionRecovery({
+      requestAgentWithSafeDispatchRecovery({
         client,
         agentParams: { sessionKey },
         sessionKey,
@@ -231,7 +232,7 @@ describe("archived issue session recovery", () => {
     };
 
     await expect(
-      requestAgentWithArchivedSessionRecovery({
+      requestAgentWithSafeDispatchRecovery({
         client,
         agentParams: { sessionKey },
         agentId: "macgyver",
@@ -265,7 +266,7 @@ describe("archived issue session recovery", () => {
     };
 
     await expect(
-      requestAgentWithArchivedSessionRecovery({
+      requestAgentWithSafeDispatchRecovery({
         client,
         agentParams: { sessionKey },
         sessionKey,
@@ -276,6 +277,38 @@ describe("archived issue session recovery", () => {
       }),
     ).rejects.toThrow("Stopped after restoring archived OpenClaw session");
     expect(calls).toEqual(["agent", "sessions.describe", "sessions.patch"]);
+  });
+
+  it("preserves ambiguous provider admission after an agent request timeout", async () => {
+    const calls: string[] = [];
+    const client: GatewayRequestClient = {
+      async request<T>(method: string): Promise<T> {
+        calls.push(method);
+        throw new Error("gateway request timeout (agent)");
+      },
+    };
+    const logs: string[] = [];
+
+    const result = await requestAgentWithSafeDispatchRecovery<Record<string, unknown>>({
+      client,
+      agentParams: { sessionKey, idempotencyKey: "run-timeout" },
+      dispatchRunId: "run-timeout",
+      sessionKey,
+      timeoutMs: 10_000,
+      restoreArchivedIssueSession: true,
+      onLog: async (_stream, text) => {
+        logs.push(text);
+      },
+    });
+
+    expect(isAgentRequestTimeoutError(new Error("gateway request timeout (agent)"))).toBe(true);
+    expect(result).toEqual({
+      status: "accepted",
+      runId: "run-timeout",
+      dispatchConfirmation: "deferred_after_request_timeout",
+    });
+    expect(calls).toEqual(["agent"]);
+    expect(logs.join("\n")).toContain("preserving possible provider admission");
   });
 });
 

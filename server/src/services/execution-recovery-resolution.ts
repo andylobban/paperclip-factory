@@ -190,11 +190,6 @@ export async function validateExecutionReconciliation(input: {
         !run.lastUsefulActionAt &&
         !run.usageJson &&
         !settlement;
-      const timedOutBeforeObservedAdmission =
-        run.resultJson?.timeoutFired === true &&
-        ["timeout", "cancelled", "failed"].includes(
-          String(run.resultJson?.stopReason ?? ""),
-        );
       const rejectedByQueuedRunGate =
         !run.startedAt &&
         run.errorCode === "issue_continuation_waiting_on_review" &&
@@ -219,7 +214,6 @@ export async function validateExecutionReconciliation(input: {
       const runProvesNoAdmission =
         noObservedProviderWork &&
         (
-          timedOutBeforeObservedAdmission ||
           rejectedByQueuedRunGate ||
           gatewayConnectionRefusedBeforeAdmission ||
           archivedIssueSessionRejectedBeforeAdmission

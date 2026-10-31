@@ -50,6 +50,12 @@ with `archived=false` after resolving and fencing the exact session ID through
 idempotent `agent` request once. It does not auto-restore fixed or run-scoped
 sessions, and it does not retry any other gateway rejection.
 
+If the initial `agent` request itself times out after dispatch, the adapter does
+not classify that as non-admission and does not resend the request. It preserves
+the run ID from the idempotency key and continues to `agent.wait` for an
+authoritative provider settlement, because OpenClaw may admit queued work after
+the request timeout.
+
 ## Payload Mapping
 
 The agent request is built as:

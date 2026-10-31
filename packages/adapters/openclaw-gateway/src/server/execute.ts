@@ -1015,10 +1015,15 @@ export function isArchivedSessionGatewayError(err: unknown, sessionKey: string):
   return err.message === `Session "${sessionKey}" is archived. Restore it before starting new work.`;
 }
 
-export async function requestAgentWithArchivedSessionRecovery<T>(params: {
+export function isAgentRequestTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.message === "gateway request timeout (agent)";
+}
+
+export async function requestAgentWithSafeDispatchRecovery<T>(params: {
   client: GatewayRequestClient;
   agentParams: Record<string, unknown>;
   agentId?: string | null;
+  dispatchRunId?: string | null;
   sessionKey: string;
   timeoutMs: number;
   restoreArchivedIssueSession: boolean;
@@ -1030,6 +1035,17 @@ export async function requestAgentWithArchivedSessionRecovery<T>(params: {
       timeoutMs: params.timeoutMs,
     });
   } catch (err) {
+    if (params.dispatchRunId && isAgentRequestTimeoutError(err)) {
+      await params.onLog(
+        "stdout",
+        `[openclaw-gateway] agent request timed out after dispatch runId=${params.dispatchRunId}; preserving possible provider admission and waiting for authoritative settlement\n`,
+      );
+      return {
+        status: "accepted",
+        runId: params.dispatchRunId,
+        dispatchConfirmation: "deferred_after_request_timeout",
+      } as T;
+    }
     if (
       !params.restoreArchivedIssueSession ||
       !isArchivedSessionGatewayError(err, params.sessionKey)
@@ -1840,10 +1856,11 @@ async function executeGateway(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       }
       const acceptedOutcome = await Promise.race([
-        requestAgentWithArchivedSessionRecovery<Record<string, unknown>>({
+        requestAgentWithSafeDispatchRecovery<Record<string, unknown>>({
           client,
           agentParams,
           agentId: configuredAgentId,
+          dispatchRunId: ctx.runId,
           sessionKey,
           timeoutMs: connectTimeoutMs,
           restoreArchivedIssueSession: sessionKeyStrategy === "issue" && Boolean(wakePayload.issueId),

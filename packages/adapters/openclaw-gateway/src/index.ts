@@ -46,6 +46,7 @@ Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run
 - sessionKey (string, optional): fixed session key when strategy=fixed (default paperclip)
 - Issue-scoped routing automatically restores the exact session once when OpenClaw rejects it as archived, then retries the same idempotent dispatch. Fixed and run-scoped sessions are never auto-restored.
+- An agent-request timeout after dispatch is treated as ambiguous provider admission: the request is not resent, and the adapter waits on the idempotent run ID for authoritative settlement.
 
 Wake payload notes:
 - Paperclip wake context is embedded into the generated message text

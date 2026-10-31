@@ -2211,7 +2211,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     ).toBe("todo");
   });
 
-  it("accepts an authorised verified non-admission when the stopped OpenClaw run cannot produce a receipt", async () => {
+  it("rejects timeout-only non-admission evidence for a stopped OpenClaw run", async () => {
     const { companyId, coderId, sourceIssueId, runId, action } =
       await seedAutomaticNoReplayHold();
     await db
@@ -2253,17 +2253,15 @@ describeEmbeddedPostgres("issue recovery actions", () => {
             "The authorised provider audit found zero admission events and zero external actions for this exact run.",
         },
       })
-      .expect(200);
+      .expect(409);
 
-    expect(response.body.executionReconciliationResult).toMatchObject({
-      disposition: "verified_no_op",
-      actionOutcome: "not_performed",
-      replayStarted: false,
-    });
+    expect(response.body.code).toBe(
+      "execution_provider_non_admission_unverified",
+    );
     expect(
       (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]
         ?.status,
-    ).toBe("todo");
+    ).toBe("blocked");
   });
 
   it.each([
