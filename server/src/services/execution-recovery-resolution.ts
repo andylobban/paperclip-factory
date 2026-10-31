@@ -205,12 +205,24 @@ export async function validateExecutionReconciliation(input: {
         run.resultJson?.stopReason === "adapter_failed" &&
         typeof run.error === "string" &&
         /^connect ECONNREFUSED(?:\s|$)/.test(run.error);
+      const archivedSessionMatch =
+        typeof run.error === "string"
+          ? /^Session "([^"]+)" is archived\. Restore it before starting new work\.$/.exec(
+              run.error,
+            )
+          : null;
+      const archivedIssueSessionRejectedBeforeAdmission =
+        run.errorCode === "openclaw_gateway_request_failed" &&
+        run.resultJson?.stopReason === "adapter_failed" &&
+        archivedSessionMatch?.[1]?.startsWith("agent:") === true &&
+        archivedSessionMatch[1].endsWith(`:paperclip:issue:${issueId}`);
       const runProvesNoAdmission =
         noObservedProviderWork &&
         (
           timedOutBeforeObservedAdmission ||
           rejectedByQueuedRunGate ||
-          gatewayConnectionRefusedBeforeAdmission
+          gatewayConnectionRefusedBeforeAdmission ||
+          archivedIssueSessionRejectedBeforeAdmission
         );
       if (!runProvesNoAdmission) {
         throw conflict(

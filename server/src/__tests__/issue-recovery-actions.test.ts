@@ -2339,6 +2339,108 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it("accepts verified non-admission for an exact archived issue-session rejection", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "failed",
+        errorCode: "openclaw_gateway_request_failed",
+        error: `Session "agent:macgyver:paperclip:issue:${sourceIssueId}" is archived. Restore it before starting new work.`,
+        resultJson: {
+          stopReason: "adapter_failed",
+          timeoutFired: false,
+          timeoutSource: "config",
+        },
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "The exact archived issue-session rejection proves that OpenClaw rejected dispatch before provider admission.",
+        },
+      })
+      .expect(200);
+
+    expect(response.body.executionReconciliationResult).toMatchObject({
+      disposition: "verified_no_op",
+      actionOutcome: "not_performed",
+      replayStarted: false,
+    });
+  });
+
+  it("rejects archived-session evidence for a different issue", async () => {
+    const { companyId, coderId, sourceIssueId, runId, action } =
+      await seedAutomaticNoReplayHold();
+    await db
+      .update(agents)
+      .set({ adapterType: "openclaw_gateway" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "failed",
+        errorCode: "openclaw_gateway_request_failed",
+        error: `Session "agent:macgyver:paperclip:issue:${randomUUID()}" is archived. Restore it before starting new work.`,
+        resultJson: {
+          stopReason: "adapter_failed",
+          timeoutFired: false,
+          timeoutSource: "config",
+        },
+        usageJson: null,
+        lastUsefulActionAt: null,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.id, runId),
+        ),
+      );
+
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          providerAdmission: "verified_not_admitted",
+          actionOutcome: "not_performed",
+          outcomeEvidence:
+            "This archived-session rejection belongs to a different issue and must not clear the execution hold.",
+        },
+      })
+      .expect(409);
+
+    expect(response.body.code).toBe(
+      "execution_provider_non_admission_unverified",
+    );
+  });
+
   it("records a board reconciliation without dispatching successor work", async () => {
     const { companyId, coderId, sourceIssueId, runId, action } =
       await seedAutomaticNoReplayHold();
