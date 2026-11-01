@@ -6972,6 +6972,8 @@ export function shouldAutoCheckoutIssueForWake(input: {
 
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
   if (!wakeReason) return false;
+  // Attention grants permission to answer a card, not to acquire its blocked work.
+  if (wakeReason === "interaction_pending") return false;
   if (wakeReason === "issue_comment_mentioned") return false;
   if (wakeReason === "source_scoped_recovery_action") return false;
   if (wakeReason.startsWith("execution_")) return false;

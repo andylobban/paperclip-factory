@@ -900,11 +900,12 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({ runId: null, agentId: null });
   });
 
-  it.each(["addressed", "unrelated", "human_only"])("verifies %s interaction attention before allowing a non-assignee responder", async (audience) => {
+  it.each(["addressed", "executor", "unrelated", "human_only"])("verifies %s interaction attention before allowing a responder", async (audience) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const executorId = randomUUID(), issueId = randomUUID(), interactionId = randomUUID();
     await seedAgent({ id: executorId, companyId, name: "Executor" });
-    await seedIssue({ issueId, companyId, status: "blocked", assigneeAgentId: executorId });
+    const ownerId = audience === "executor" ? agentId : executorId;
+    await seedIssue({ issueId, companyId, status: "blocked", assigneeAgentId: ownerId });
     await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId,
       kind: "ask_user_questions", continuationPolicy: "wake_assignee", createdByAgentId: executorId,
       addresseeAgentId: audience === "unrelated" ? executorId : agentId,
@@ -913,9 +914,9 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     });
     const runId = await seedRun({ companyId, agentId, contextSnapshot: { issueId, interactionId, wakeReason: "interaction_pending" } });
     const outcome = await createPostgresRunDispatchAdapter(db).cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now: new Date() });
-    expect(outcome).toMatchObject({ outcome: audience === "addressed" ? "not_stale" : "cancelled" });
+    expect(outcome).toMatchObject({ outcome: audience === "addressed" || audience === "executor" ? "not_stale" : "cancelled" });
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
-    expect(issue).toMatchObject({ status: "blocked", assigneeAgentId: executorId });
+    expect(issue).toMatchObject({ status: "blocked", assigneeAgentId: ownerId });
   });
 
 });

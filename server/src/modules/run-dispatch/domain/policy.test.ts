@@ -535,6 +535,13 @@ describe("AI subscription wait ownership", () => {
 
 
 describe("required-input dispatch arbitration", () => {
+  it("permits the executor to answer only server-verified addressed attention", () => {
+    const facts = { ...baseStalenessFacts(), hasRequiredInput: true,
+      issueStatus: "blocked", isInteractionWake: true, wakeReason: "interaction_pending" };
+    expect(decideQueuedRunStaleness(facts, NOW)).toMatchObject({ stale: true, errorCode: "issue_blocked" });
+    expect(decideQueuedRunStaleness({ ...facts, isVerifiedInteractionAttention: true }, NOW))
+      .toEqual({ stale: false });
+  });
   it("cancels an assignee comment wake that raced with required input creation", () => {
     expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), hasRequiredInput: true,
       issueStatus: "blocked", wakeReason: "issue_commented", wakeCommentIdPresent: true }, NOW))

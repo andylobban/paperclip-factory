@@ -4,6 +4,13 @@ import {
 } from "../services/heartbeat.ts";
 
 describe("shouldAutoCheckoutIssueForWake", () => {
+  it("keeps addressed interaction attention separate from work checkout even for the executor", () => {
+    expect(shouldAutoCheckoutIssueForWake({
+      contextSnapshot: { wakeReason: "interaction_pending" },
+      issueStatus: "blocked", issueAssigneeAgentId: "agent-1",
+      isDependencyReady: true, agentId: "agent-1",
+    })).toBe(false);
+  });
   it("auto-checks out an assigned todo issue for an actionable wake", () => {
     expect(shouldAutoCheckoutIssueForWake({
       contextSnapshot: { wakeReason: "issue_assigned" },

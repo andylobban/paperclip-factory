@@ -130,6 +130,7 @@ export type StalenessDecision =
 
 export type QueuedRunFacts = {
   hasRequiredInput?: boolean;
+  isVerifiedInteractionAttention?: boolean;
   inputWaitContinuationCurrent?: boolean;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
@@ -510,7 +511,7 @@ export function decideQueuedRunStaleness(
   if (facts.inputWaitContinuationCurrent === false) {
     return { stale: true, errorCode: "issue_blocked", reason: "Cancelled because the input wait continuation disposition changed", details: { issueId: facts.issueId } };
   }
-  if (facts.hasRequiredInput && facts.issueAssigneeAgentId === facts.runAgentId) {
+  if (facts.hasRequiredInput && facts.issueAssigneeAgentId === facts.runAgentId && !facts.isVerifiedInteractionAttention) {
     return { stale: true, errorCode: "issue_blocked", reason: "Cancelled because required input remains unresolved", details: { issueId: facts.issueId } };
   }
 

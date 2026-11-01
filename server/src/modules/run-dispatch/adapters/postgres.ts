@@ -519,8 +519,9 @@ export function createPostgresRunDispatchAdapter(
       eq(issueThreadInteractions.issueId, issueId), eq(issueThreadInteractions.status, "pending"),
       eq(issueThreadInteractions.addresseeAgentId, input.agentId),
     )).then((rows) => rows[0] ?? null) : null;
-    const isInteractionWake = Boolean(addressedInteraction &&
-      issueThreadInteractionAttentionAgentAllowed({ agentId: input.agentId, interaction: addressedInteraction })) || allowsIssueInteractionWake(
+    const isVerifiedInteractionAttention = Boolean(addressedInteraction &&
+      issueThreadInteractionAttentionAgentAllowed({ agentId: input.agentId, interaction: addressedInteraction }));
+    const isInteractionWake = isVerifiedInteractionAttention || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -589,6 +590,7 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
       hasRequiredInput: issue ? await hasRequiredInput(dbOrTx, input.companyId, issueId) : false,
+      isVerifiedInteractionAttention,
       inputWaitContinuationCurrent: !context.inputWaitContinuation || Boolean(issue && inputWaitContinuationIsCurrent(context.inputWaitContinuation, issue)),
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
