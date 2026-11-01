@@ -27,6 +27,7 @@ import {
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import { isOpenClawPreAdmissionFailure } from "./openclaw-non-admission.js";
 import {
   executionReconciliationIdempotencyKey,
   legacyExecutionReconciliationIdempotencyKey,
@@ -175,7 +176,7 @@ export async function validateExecutionReconciliation(input: {
     );
   }
   const [runAgent] = await db
-    .select({ adapterType: agents.adapterType })
+    .select({ adapterType: agents.adapterType, adapterConfig: agents.adapterConfig })
     .from(agents)
     .where(
       and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)),
@@ -265,7 +266,8 @@ export async function validateExecutionReconciliation(input: {
         (
           rejectedByQueuedRunGate ||
           gatewayConnectionRefusedBeforeAdmission ||
-          archivedIssueSessionRejectedBeforeAdmission
+          archivedIssueSessionRejectedBeforeAdmission ||
+          isOpenClawPreAdmissionFailure(run, runAgent.adapterConfig?.agentId)
         );
       if (!runProvesNoAdmission) {
         throw conflict(

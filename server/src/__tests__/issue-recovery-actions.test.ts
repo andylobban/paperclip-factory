@@ -2339,6 +2339,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   it.each([
     {
       name: "stale queued-run review gate",
+      configuredAgentId: null,
       run: {
         status: "cancelled" as const,
         startedAt: null,
@@ -2353,6 +2354,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     },
     {
       name: "local gateway connection refusal",
+      configuredAgentId: null,
       run: {
         status: "failed" as const,
         errorCode: "openclaw_gateway_request_failed",
@@ -2364,12 +2366,32 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         },
       },
     },
-  ])("accepts verified non-admission for a deterministic pre-provider $name", async ({ run }) => {
+    {
+      name: "unopened gateway WebSocket",
+      configuredAgentId: null,
+      run: {
+        status: "timed_out" as const,
+        errorCode: "timeout",
+        error: "gateway websocket open timeout",
+        resultJson: { stopReason: "timeout", timeoutFired: true, timeoutSource: "config" },
+      },
+    },
+    {
+      name: "unpublished configured reply runtime",
+      configuredAgentId: "scully",
+      run: {
+        status: "failed" as const,
+        errorCode: "openclaw_gateway_request_failed",
+        error: "prepared reply dispatch runtime owner was not published for scully",
+        resultJson: { stopReason: "adapter_failed", timeoutFired: false, timeoutSource: "config" },
+      },
+    },
+  ])("accepts verified non-admission for a deterministic pre-provider $name", async ({ run, configuredAgentId }) => {
     const { companyId, coderId, sourceIssueId, runId, action } =
       await seedAutomaticNoReplayHold();
     await db
       .update(agents)
-      .set({ adapterType: "openclaw_gateway" })
+      .set({ adapterType: "openclaw_gateway", adapterConfig: configuredAgentId ? { agentId: configuredAgentId } : {} })
       .where(eq(agents.id, coderId));
     await db
       .update(heartbeatRuns)
