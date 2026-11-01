@@ -1,3 +1,5 @@
+import { issueThreadInteractionAttentionAgentAllowed } from "../../../services/issue-thread-interaction-resolution.js";
+import { hasRequiredInput, inputWaitContinuationIsCurrent, requiredInputCondition } from "../../../services/issue-input-wait.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -362,6 +364,7 @@ export function createPostgresRunDispatchAdapter(
         dbOrTx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
           eq(issueThreadInteractions.companyId, input.companyId),
           eq(issueThreadInteractions.issueId, issueId), eq(issueThreadInteractions.status, "pending"),
+          or(requiredInputCondition(), sql`${issueThreadInteractions.kind} <> 'ask_user_questions'`),
         )).limit(1),
         dbOrTx.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
           eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId),
@@ -500,6 +503,8 @@ export function createPostgresRunDispatchAdapter(
         executionRunId: issues.executionRunId,
         checkoutRunId: issues.checkoutRunId,
         executionState: issues.executionState,
+        statusVersion: issues.statusVersion,
+        assigneeUserId: issues.assigneeUserId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)));
@@ -508,7 +513,14 @@ export function createPostgresRunDispatchAdapter(
     );
 
     const wakeCommentId = deriveCommentId(context);
-    const isInteractionWake = allowsIssueInteractionWake(
+    const addressedInteractionId = context.wakeReason === "interaction_pending" ? readNonEmptyString(context.interactionId) : null;
+    const addressedInteraction = addressedInteractionId ? await dbOrTx.select().from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.id, addressedInteractionId), eq(issueThreadInteractions.companyId, input.companyId),
+      eq(issueThreadInteractions.issueId, issueId), eq(issueThreadInteractions.status, "pending"),
+      eq(issueThreadInteractions.addresseeAgentId, input.agentId),
+    )).then((rows) => rows[0] ?? null) : null;
+    const isInteractionWake = Boolean(addressedInteraction &&
+      issueThreadInteractionAttentionAgentAllowed({ agentId: input.agentId, interaction: addressedInteraction })) || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -576,6 +588,8 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
+      hasRequiredInput: issue ? await hasRequiredInput(dbOrTx, input.companyId, issueId) : false,
+      inputWaitContinuationCurrent: !context.inputWaitContinuation || Boolean(issue && inputWaitContinuationIsCurrent(context.inputWaitContinuation, issue)),
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,

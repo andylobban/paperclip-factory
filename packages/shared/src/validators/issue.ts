@@ -1465,6 +1465,7 @@ export const paperclipQuestionSetPayloadSchema = z
 export const askUserQuestionsPayloadSchema = z
   .object({
     version: z.literal(1),
+    blocksWork: z.boolean().optional(),
     title: z.string().trim().max(240).nullable().optional(),
     submitLabel: z.string().trim().max(120).nullable().optional(),
     supersedeOnUserComment: z.boolean().optional(),
@@ -1528,6 +1529,10 @@ export const askUserQuestionsAnswerSchema = z.object({
 
 export const askUserQuestionsResultSchema = z.object({
   version: z.literal(1),
+  workContinuationKey: z.union([z.string(), z.literal(false)]).optional(),
+  workContinuationStatusVersion: z.number().int().nonnegative().optional(),
+  workContinuationAssigneeAgentId: z.string().nullable().optional(),
+  workContinuationAssigneeUserId: z.string().nullable().optional(),
   outcome: z
     .enum(["skipped", "withdrawn", "issue_closed", "addressee_deleted"])
     .optional(),

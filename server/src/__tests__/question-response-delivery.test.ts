@@ -1243,4 +1243,41 @@ describeEmbeddedPostgres("question response delivery", () => {
       ].join("\n"),
     );
   });
+  it("two concurrent required answers deliver exactly one continuation without cancelling the source for the partial answer", async () => {
+    const f = await seed({ sourceStatus: "running" });
+    const interactions = issueThreadInteractionService(db);
+    const request = { kind: "ask_user_questions" as const, continuationPolicy: "wake_assignee" as const,
+      sourceRunId: f.sourceRunId, payload: { version: 1 as const, blocksWork: true, questions: [{ id: "input", prompt: "Required source", required: true, selectionMode: "single" as const, options: [{ id: "ready", label: "Ready" }] }] } };
+    const issue = { id: f.issueId, companyId: f.companyId };
+    const first = await interactions.create(issue, { ...request, idempotencyKey: "first" }, { agentId: f.agentId, runId: f.sourceRunId });
+    const second = await interactions.create(issue, { ...request, idempotencyKey: "second" }, { agentId: f.agentId, runId: f.sourceRunId });
+    const answers = { answers: [{ questionId: "input", optionIds: ["ready"] }] };
+    await Promise.all([
+      interactions.answerQuestions(issue, first.id, answers, { userId: "board-user" }),
+      interactions.answerQuestions(issue, second.id, answers, { userId: "board-user" }),
+    ]);
+    const cancelRun = vi.fn(), resolveNativeQuestion = vi.fn(async () => "not_native" as const);
+    const wakeup = vi.fn(async () => {
+      const [run] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "queued", contextSnapshot: { issueId: f.issueId } }).returning();
+      return run;
+    });
+    const delivery = questionResponseDeliveryService(db, { heartbeat: { wakeup, cancelRun } as never, resolveNativeQuestion });
+    await Promise.all([delivery.deliver(first.id), delivery.deliver(second.id)]);
+    await Promise.all([delivery.deliver(first.id), delivery.deliver(second.id)]);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup).toHaveBeenCalledWith(f.agentId, expect.objectContaining({ idempotencyKey: `question-response:${first.id}` }));
+    expect(resolveNativeQuestion).toHaveBeenCalledTimes(1);
+    expect(cancelRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["reblock", "reassign"])("a %s after answer prevents outbox wake and source cancellation", async (change) => {
+    const f = await seed({ sourceStatus: "running" });
+    if (change === "reblock") await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    else await db.update(issues).set({ assigneeAgentId: null, assigneeUserId: "new-owner" }).where(eq(issues.id, f.issueId));
+    const wakeup = vi.fn(), cancelRun = vi.fn(), resolveNativeQuestion = vi.fn();
+    const delivery = questionResponseDeliveryService(db, { heartbeat: { wakeup, cancelRun } as never, resolveNativeQuestion });
+    expect(await delivery.deliver(f.interaction.id)).toMatchObject({ status: "failed" });
+    expect(wakeup).not.toHaveBeenCalled(); expect(cancelRun).not.toHaveBeenCalled(); expect(resolveNativeQuestion).not.toHaveBeenCalled();
+  });
+
 });

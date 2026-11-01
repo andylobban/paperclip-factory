@@ -1,3 +1,5 @@
+import { lockIssueCloseoutGraph } from "./issue-closeout.js";
+import { interactionBlocksWork, requiredInputCondition, lockInputIssue, synchronizeIssueInputWait } from "./issue-input-wait.js";
 import { currentContinuationOrigins } from "./execution-continuation.js";
 import { connectionIntentDeliveries } from "@paperclipai/db";
 import { isDeepStrictEqual } from "node:util";
@@ -564,17 +566,13 @@ function isUserCommentSupersedableKind(
 }
 
 function isIssueThreadInteractionIdempotencyConflict(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const err = error as {
-    code?: string;
-    constraint?: string;
-    constraint_name?: string;
-  };
-  const constraint = err.constraint ?? err.constraint_name;
-  return (
-    err.code === "23505" &&
-    constraint === ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT
-  );
+  // DrizzleQueryError wraps the driver's SQLSTATE and constraint in cause.
+  for (let depth = 0; depth < 4 && typeof error === "object" && error !== null; depth++) {
+    const candidate = error as { code?: string; constraint?: string; constraint_name?: string; cause?: unknown };
+    if (candidate.code === "23505" && (candidate.constraint ?? candidate.constraint_name) === ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT) return true;
+    error = candidate.cause;
+  }
+  return false;
 }
 
 function isEquivalentCreateRequest(
@@ -824,6 +822,7 @@ function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
 }
 
 function shouldSupersedeInteractionOnUserComment(interaction: UserCommentSupersedableInteraction) {
+  if (interactionBlocksWork(interaction)) return false;
   if (interaction.kind === "connection_intent") return false;
   if (interaction.kind === "request_confirmation" && interaction.payload.toolAction) return false;
   return interaction.payload.supersedeOnUserComment === true;
@@ -838,7 +837,7 @@ function normalizeCreateInteractionInput(
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: interactionBlocksWork(input) ? false : input.payload.supersedeOnUserComment ?? true,
         },
       };
     case "request_confirmation":
@@ -3323,6 +3322,21 @@ export function issueThreadInteractionService(
           data.kind === "request_confirmation" &&
           data.payload.secretProposal !== undefined,
       });
+      if (interactionBlocksWork(data) && !data.addresseeAgentId && !data.addresseeUserId) {
+        // Unaddressed internal input belongs to the creator's accountable manager,
+        // never implicitly to a human dispatcher. Human-only governance stays intact.
+        if (actor.agentId && policy.effectiveResolverPolicy !== "human_only") {
+          const creator = await db.select({ reportsTo: agents.reportsTo }).from(agents)
+            .where(and(eq(agents.id, actor.agentId), eq(agents.companyId, issue.companyId)))
+            .then((rows) => rows[0] ?? null);
+          if (creator?.reportsTo) data.addresseeAgentId = creator.reportsTo;
+        } else if (actor.userId) {
+          data.addresseeUserId = actor.userId;
+        }
+      }
+      if (interactionBlocksWork(data) && data.continuationPolicy === "none") {
+        throw unprocessable("Required input must declare a continuation policy");
+      }
       const normalizedData = {
         ...data,
         resolverPolicy: policy.requestedResolverPolicy,
@@ -3459,6 +3473,7 @@ export function issueThreadInteractionService(
         data.kind === "request_checkbox_confirmation" ||
         data.kind === "request_item_verdicts";
 
+      const waitActivityPublications: ActivityPublication[] = [];
       let created: IssueThreadInteractionRow;
       let superseded: IssueThreadInteractionRow[] = [];
       try {
@@ -3468,6 +3483,7 @@ export function issueThreadInteractionService(
         // Idempotent reuse above stays allowed so retries of a pre-close
         // create keep returning the (by now expired) original.
         const result = await db.transaction(async (tx) => {
+          if (interactionBlocksWork(data)) await lockIssueCloseoutGraph(tx, issue.companyId);
           const [issueRow] = await tx
             .select({ status: issues.status })
             .from(issues)
@@ -3533,8 +3549,11 @@ export function issueThreadInteractionService(
             ((data.kind === "request_confirmation" &&
               data.payload.toolAction === undefined &&
               data.payload.secretProposal === undefined) ||
-              data.kind === "ask_user_questions");
+              (data.kind === "ask_user_questions" && !interactionBlocksWork(data)));
           if (!actor.agentId || !canSupersedeSiblingCards) {
+            if (interactionBlocksWork(row)) {
+              await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, { activityPublications: waitActivityPublications });
+            }
             await enqueueIssueInteractionChatPublications(
               tx as unknown as Db,
               hydrateInteraction(row),
@@ -3565,6 +3584,7 @@ export function issueThreadInteractionService(
                 eq(issueThreadInteractions.createdByAgentId, actor.agentId),
                 eq(issueThreadInteractions.status, "pending"),
                 ne(issueThreadInteractions.id, row.id),
+                data.kind === "ask_user_questions" ? sql`not (${requiredInputCondition()})` : undefined,
               ),
             )
             .returning();
@@ -3589,6 +3609,9 @@ export function issueThreadInteractionService(
               tx as unknown as Db,
               hydrateInteraction(supersededRow),
             );
+          }
+          if (interactionBlocksWork(row) || supersededRows.some(interactionBlocksWork)) {
+            await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, { activityPublications: waitActivityPublications });
           }
           await enqueueIssueInteractionChatPublications(
             tx as unknown as Db,
@@ -3624,6 +3647,7 @@ export function issueThreadInteractionService(
         return interaction;
       }
 
+      for (const publication of waitActivityPublications) publishActivity(publication);
       await touchIssue(db, issue.id);
       if (superseded.length > 0) {
         await emitResolvedInteractionsTelemetry(
@@ -4663,7 +4687,14 @@ export function issueThreadInteractionService(
       // "approved" is revoked too — the request can be approved from the tool
       // review queue while the card is still pending, and an executable
       // request must not outlive a withdrawn card.
+      const waitActivityPublications: ActivityPublication[] = [];
       const updated = await db.transaction(async (tx) => {
+        let hadWaitReceipt = false;
+        if (current.kind === "ask_user_questions") {
+          const lockedIssue = await lockInputIssue(tx as unknown as Db, issue.companyId, issue.id);
+          if (!lockedIssue || isTerminalIssueStatus(lockedIssue.status)) throw interactionIssueClosedError();
+          hadWaitReceipt = Boolean(lockedIssue.unblockDescriptor?.interactionWait);
+        }
         await resolveLinkedToolActionRequests(tx, current, {
           status: "cancelled",
           fromStatuses: ["pending", "approved"],
@@ -4722,9 +4753,26 @@ export function issueThreadInteractionService(
           tx as unknown as Db,
           withdrawn,
         );
+        if (current.kind === "ask_user_questions") {
+          let continuationKey: string | false = false;
+          let continuationIssue: typeof issues.$inferSelect | undefined;
+          await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, {
+            onRestored: (key, issue) => { continuationKey = key; continuationIssue = issue; },
+            activityPublications: waitActivityPublications, actor,
+          });
+          if (hadWaitReceipt && interactionBlocksWork(current)) {
+            row.result = { ...row.result, workContinuationKey: continuationKey,
+              ...(continuationIssue ? { workContinuationStatusVersion: continuationIssue.statusVersion,
+                workContinuationAssigneeAgentId: continuationIssue.assigneeAgentId,
+                workContinuationAssigneeUserId: continuationIssue.assigneeUserId } : {}),
+            } as typeof row.result;
+            await tx.update(issueThreadInteractions).set({ result: row.result }).where(eq(issueThreadInteractions.id, row.id));
+          }
+        }
         return row;
       });
 
+      for (const publication of waitActivityPublications) publishActivity(publication);
       await touchIssue(db, issue.id);
       const withdrawn = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, withdrawn);
@@ -4770,7 +4818,14 @@ export function issueThreadInteractionService(
         answers: input.answers,
       });
 
+      const waitActivityPublications: ActivityPublication[] = [];
       const updated = await db.transaction(async (tx) => {
+        let hadWaitReceipt = false;
+        if (current.kind === "ask_user_questions") {
+          const lockedIssue = await lockInputIssue(tx as unknown as Db, issue.companyId, issue.id);
+          if (!lockedIssue || isTerminalIssueStatus(lockedIssue.status)) throw interactionIssueClosedError();
+          hadWaitReceipt = Boolean(lockedIssue.unblockDescriptor?.interactionWait);
+        }
         await mutationOptions.beforeResolveInTransaction?.(tx);
         const resolvedAt = new Date();
         const [row] = await tx
@@ -4811,9 +4866,26 @@ export function issueThreadInteractionService(
           tx as unknown as Db,
           answered,
         );
+        if (current.kind === "ask_user_questions") {
+          let continuationKey: string | false = false;
+          let continuationIssue: typeof issues.$inferSelect | undefined;
+          await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, {
+            onRestored: (key, issue) => { continuationKey = key; continuationIssue = issue; },
+            activityPublications: waitActivityPublications, actor,
+          });
+          if (hadWaitReceipt && interactionBlocksWork(current)) {
+            row.result = { ...row.result, workContinuationKey: continuationKey,
+              ...(continuationIssue ? { workContinuationStatusVersion: continuationIssue.statusVersion,
+                workContinuationAssigneeAgentId: continuationIssue.assigneeAgentId,
+                workContinuationAssigneeUserId: continuationIssue.assigneeUserId } : {}),
+            } as typeof row.result;
+            await tx.update(issueThreadInteractions).set({ result: row.result }).where(eq(issueThreadInteractions.id, row.id));
+          }
+        }
         return row;
       });
 
+      for (const publication of waitActivityPublications) publishActivity(publication);
       await touchIssue(db, issue.id);
       const answered = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, answered);
@@ -4845,7 +4917,14 @@ export function issueThreadInteractionService(
 
       const reason = data.reason?.trim() || null;
       const now = new Date();
+      const waitActivityPublications: ActivityPublication[] = [];
       const updated = await db.transaction(async (tx) => {
+        let hadWaitReceipt = false;
+        if (current.kind === "ask_user_questions") {
+          const lockedIssue = await lockInputIssue(tx as unknown as Db, issue.companyId, issue.id);
+          if (!lockedIssue || isTerminalIssueStatus(lockedIssue.status)) throw interactionIssueClosedError();
+          hadWaitReceipt = Boolean(lockedIssue.unblockDescriptor?.interactionWait);
+        }
         await resolveLinkedToolActionRequests(tx, current, {
           status: "cancelled",
           fromStatuses: ["pending", "approved"],
@@ -4900,9 +4979,26 @@ export function issueThreadInteractionService(
           tx as unknown as Db,
           hydrateInteraction(row),
         );
+        if (current.kind === "ask_user_questions") {
+          let continuationKey: string | false = false;
+          let continuationIssue: typeof issues.$inferSelect | undefined;
+          await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, {
+            onRestored: (key, issue) => { continuationKey = key; continuationIssue = issue; },
+            activityPublications: waitActivityPublications, actor, restore: false,
+          });
+          if (hadWaitReceipt && interactionBlocksWork(current)) {
+            row.result = { ...row.result, workContinuationKey: continuationKey,
+              ...(continuationIssue ? { workContinuationStatusVersion: continuationIssue.statusVersion,
+                workContinuationAssigneeAgentId: continuationIssue.assigneeAgentId,
+                workContinuationAssigneeUserId: continuationIssue.assigneeUserId } : {}),
+            } as typeof row.result;
+            await tx.update(issueThreadInteractions).set({ result: row.result }).where(eq(issueThreadInteractions.id, row.id));
+          }
+        }
         return row;
       });
 
+      for (const publication of waitActivityPublications) publishActivity(publication);
       await touchIssue(db, issue.id);
       const skipped = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, skipped);
@@ -4941,7 +5037,14 @@ export function issueThreadInteractionService(
       }
 
       const reason = data.reason?.trim() || null;
+      const waitActivityPublications: ActivityPublication[] = [];
       const updated = await db.transaction(async (tx) => {
+        let hadWaitReceipt = false;
+        if (current.kind === "ask_user_questions") {
+          const lockedIssue = await lockInputIssue(tx as unknown as Db, issue.companyId, issue.id);
+          if (!lockedIssue || isTerminalIssueStatus(lockedIssue.status)) throw interactionIssueClosedError();
+          hadWaitReceipt = Boolean(lockedIssue.unblockDescriptor?.interactionWait);
+        }
         const resolvedAt = new Date();
         const [row] = await tx
           .update(issueThreadInteractions)
@@ -4975,9 +5078,26 @@ export function issueThreadInteractionService(
           tx as unknown as Db,
           cancelled,
         );
+        if (current.kind === "ask_user_questions") {
+          let continuationKey: string | false = false;
+          let continuationIssue: typeof issues.$inferSelect | undefined;
+          await synchronizeIssueInputWait(tx as unknown as Db, issue.companyId, issue.id, {
+            onRestored: (key, issue) => { continuationKey = key; continuationIssue = issue; },
+            activityPublications: waitActivityPublications, actor,
+          });
+          if (hadWaitReceipt && interactionBlocksWork(current)) {
+            row.result = { ...row.result, workContinuationKey: continuationKey,
+              ...(continuationIssue ? { workContinuationStatusVersion: continuationIssue.statusVersion,
+                workContinuationAssigneeAgentId: continuationIssue.assigneeAgentId,
+                workContinuationAssigneeUserId: continuationIssue.assigneeUserId } : {}),
+            } as typeof row.result;
+            await tx.update(issueThreadInteractions).set({ result: row.result }).where(eq(issueThreadInteractions.id, row.id));
+          }
+        }
         return row;
       });
 
+      for (const publication of waitActivityPublications) publishActivity(publication);
       await touchIssue(db, issue.id);
       const cancelled = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, cancelled);

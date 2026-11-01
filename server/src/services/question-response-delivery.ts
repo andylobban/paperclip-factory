@@ -1,3 +1,4 @@
+import { hasRequiredInput, inputWaitContinuationIsCurrent, inputWaitContinuationReceipt } from "./issue-input-wait.js";
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -853,6 +854,34 @@ export function questionResponseDeliveryService(
           : "question_response_target_unavailable",
       });
     }
+    const workContinuationKey = record(interaction.result).workContinuationKey;
+    // Save partial answers without cancelling or resuming the still-waiting provider.
+    // Only the issue-locked winner of the wait episode may deliver its continuation.
+    if (workContinuationKey === false) {
+      return recordTerminal({ delivery: claimed, interaction, status: "delivered", mode: "coalesced",
+        targetRunId: null, adapter, errorCode: "question_response_wait_continuation_not_claimed" });
+    }
+    const wakeIdempotencyKey = typeof workContinuationKey === "string"
+      ? `question-response:${workContinuationKey}` : `question-response:${interaction.id}`;
+    const changedDispositionOutcome = async () => {
+      // A committed wake remains the canonical delivery receipt after reassignment;
+      // settle against it without cancelling a provider or creating a replacement.
+      const existing = await findDurableWakeRequest({ companyId: interaction.companyId, idempotencyKey: wakeIdempotencyKey });
+      return recordTerminal({ delivery: claimed, interaction, status: existing ? "fallback_queued" : "failed",
+        mode: existing ? "wake_fallback" : null, targetRunId: existing?.run?.id ?? null, adapter,
+        errorCode: existing ? null : "question_response_required_input_or_disposition_changed" });
+    };
+    if (issue.status === "blocked" || !inputWaitContinuationIsCurrent(interaction.result, issue) ||
+      await hasRequiredInput(db, interaction.companyId, interaction.issueId)) {
+      return changedDispositionOutcome();
+    }
+    const inputWaitContinuation = inputWaitContinuationReceipt(interaction.result);
+    const continuationStillCurrent = async () => {
+      const latest = await db.select().from(issues).where(and(eq(issues.id, interaction.issueId), eq(issues.companyId, interaction.companyId)))
+        .then((rows) => rows[0] ?? null);
+      return latest && latest.status !== "blocked" && latest.status !== "done" && latest.status !== "cancelled" &&
+        inputWaitContinuationIsCurrent(interaction.result, latest) && !(await hasRequiredInput(db, interaction.companyId, interaction.issueId));
+    };
     const assigneeAgentId = issue.assigneeAgentId;
     const inferredSourceCommentId =
       sourceRun && issueIdFromRun(sourceRun) === interaction.issueId
@@ -1032,6 +1061,7 @@ export function questionResponseDeliveryService(
       sourceRun?.id === interaction.sourceRunId &&
       (sourceRun.status === "queued" || sourceRun.status === "running")
     ) {
+      if (!(await continuationStillCurrent())) return changedDispositionOutcome();
       try {
         await withClaimLease(claimed, () =>
           options.heartbeat.cancelRun(
@@ -1085,6 +1115,7 @@ export function questionResponseDeliveryService(
     }
 
     if (resolveNativeQuestion && !externalChatBoundary) {
+      if (!(await continuationStillCurrent())) return changedDispositionOutcome();
       try {
         const nativeDisposition = await withClaimLease(claimed, () =>
           resolveNativeQuestion(hydratedInteraction),
@@ -1148,7 +1179,6 @@ export function questionResponseDeliveryService(
     // This is a new, migration-fenced namespace. The partial unique index on
     // agent_wakeup_requests makes the wake transaction itself idempotent, so a
     // reclaimed stale worker cannot create a second continuation run.
-    const wakeIdempotencyKey = `question-response:${interaction.id}`;
     try {
       const existingWake = await findDurableWakeRequest({
         companyId: interaction.companyId,
@@ -1168,6 +1198,7 @@ export function questionResponseDeliveryService(
                   interactionId: interaction.id,
                   interactionKind: interaction.kind,
                   interactionStatus: interaction.status,
+                  ...(inputWaitContinuation ? { inputWaitContinuation } : {}),
                   sourceCommentId: continuationSourceCommentId,
                   sourceRunId: interaction.sourceRunId,
                   externalChatContinuation: externalChatBoundary,
@@ -1189,6 +1220,7 @@ export function questionResponseDeliveryService(
                   interactionId: interaction.id,
                   interactionKind: interaction.kind,
                   interactionStatus: interaction.status,
+                  ...(inputWaitContinuation ? { inputWaitContinuation } : {}),
                   sourceCommentId: continuationSourceCommentId,
                   sourceRunId: interaction.sourceRunId,
                   externalChatContinuation: externalChatBoundary,

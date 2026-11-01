@@ -613,6 +613,14 @@ export type IssueUnblockOwner = { agentId: string } | { userId: string } | "boar
 export interface IssueUnblockDescriptor {
   owner: IssueUnblockOwner;
   action: string;
+  /** Server-owned receipt; rejected by public unblockDescriptor input validators. */
+  interactionWait?: {
+    statusVersion: number;
+    continuationKey: string;
+    assigneeAgentId: string | null;
+    assigneeUserId: string | null;
+    interactionIds: string[];
+  };
 }
 
 export interface IssueRecoveryAction {
@@ -1287,6 +1295,8 @@ export interface PaperclipQuestionSetPayload {
 
 export interface AskUserQuestionsPayload {
   version: 1;
+  /** False permits consultation while the executor continues other work. */
+  blocksWork?: boolean;
   title?: string | null;
   submitLabel?: string | null;
   supersedeOnUserComment?: boolean;
@@ -1305,6 +1315,11 @@ export interface AskUserQuestionsAnswer {
 
 export interface AskUserQuestionsResult {
   version: 1;
+  /** Server-owned claim: only the resolution restoring this wait may continue. */
+  workContinuationKey?: string | false;
+  workContinuationStatusVersion?: number;
+  workContinuationAssigneeAgentId?: string | null;
+  workContinuationAssigneeUserId?: string | null;
   outcome?: "skipped" | "withdrawn" | "issue_closed" | "addressee_deleted";
   reason?: string | null;
   answers: AskUserQuestionsAnswer[];

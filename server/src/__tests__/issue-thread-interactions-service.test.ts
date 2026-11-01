@@ -16,6 +16,14 @@ import {
   instanceSettings,
   issueRelations,
   issueThreadInteractions,
+  issueTreeHolds,
+  pipelineAutomationExecutions,
+  pipelineCaseEvents,
+  pipelineCaseIssueLinks,
+  pipelineCases,
+  pipelines,
+  pipelineStages,
+  routines,
   issues,
   projectWorkspaces,
   projects,
@@ -49,6 +57,8 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   afterEach(async () => {
     await db.delete(issueThreadInteractions);
+    await db.delete(pipelines);
+    await db.delete(routines);
     await db.delete(activityLog);
     await db.delete(issueComments);
     await db.delete(issueDocuments);
@@ -1124,6 +1134,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       kind: "ask_user_questions",
       payload: {
         version: 1,
+        blocksWork: false,
         questions: [{
           id: "scope",
           prompt: "Choose the scope",
@@ -1278,6 +1289,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       kind: "ask_user_questions",
       payload: {
         version: 1,
+        blocksWork: false,
         questions: [{
           id: "scope",
           prompt: "Choose the scope",
@@ -1541,6 +1553,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       kind: "ask_user_questions" as const,
       payload: {
         version: 1 as const,
+        blocksWork: false,
         questions: [{
           id: "q",
           prompt,
@@ -1635,6 +1648,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       kind: "ask_user_questions" as const,
       payload: {
         version: 1 as const,
+        blocksWork: false,
         questions: [{
           id: "q",
           prompt,
@@ -1649,6 +1663,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       kind: "ask_user_questions",
       payload: {
         version: 1,
+        blocksWork: false,
         questions: [{
           id: "focus",
           prompt: "What would you like your team to focus on first?",
@@ -4247,4 +4262,245 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       });
     });
   });
+  async function seedInputWait() {
+    const seeded = await seedConfirmationIssue("Required input");
+    const managerId = randomUUID();
+    const executorId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values([
+      { id: managerId, companyId: seeded.companyId, name: "Turing", role: "cto", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: executorId, companyId: seeded.companyId, name: "Hopper", role: "engineer", reportsTo: managerId, status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: seeded.companyId, agentId: executorId, status: "running", contextSnapshot: { issueId: seeded.issueId } });
+    await db.update(issues).set({ assigneeAgentId: executorId, executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, seeded.issueId));
+    const input = {
+      kind: "ask_user_questions" as const,
+      title: "Provide implementation source",
+      continuationPolicy: "wake_assignee" as const,
+      idempotencyKey: "implementation-source-v1",
+      sourceRunId: runId,
+      payload: { version: 1 as const, questions: [{ id: "source", prompt: "Provide repository and approved work package", selectionMode: "single" as const, required: true, options: [{ id: "registered", label: "Registered package" }] }] },
+    };
+    return { ...seeded, managerId, executorId, runId, input,
+      issue: { id: seeded.issueId, companyId: seeded.companyId },
+      actor: { agentId: executorId },
+      answer: { answers: [{ questionId: "source", optionIds: ["registered"] }] },
+      read: () => db.select().from(issues).where(eq(issues.id, seeded.issueId)).then((rows) => rows[0]),
+    };
+  }
+
+  it("AND-955: a successful source run leaves required input blocked and routed to its manager", async () => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    expect(created.addresseeAgentId).toBe(f.managerId);
+    expect(await f.read()).toMatchObject({ status: "blocked", assigneeAgentId: f.executorId,
+      executionRunId: f.runId, checkoutRunId: f.runId,
+      unblockDescriptor: { owner: { agentId: f.managerId }, interactionWait: { interactionIds: [created.id], continuationKey: created.id } },
+    });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));
+    await expect(issuesSvc.checkout(f.issueId, f.executorId, ["blocked"], null)).rejects.toMatchObject({ status: 409, details: { code: "issue_waiting_for_input" } });
+    expect((await f.read()).status).toBe("blocked");
+  });
+
+  it("keeps explicitly optional questions executable and ordinary optional supersession available", async () => {
+    const f = await seedInputWait();
+    const optional = { ...f.input, payload: { ...f.input.payload, blocksWork: false } };
+    const created = await interactionsSvc.create(f.issue, optional, f.actor);
+    expect((await f.read()).status).toBe("in_progress");
+    expect(created).toMatchObject({ payload: { supersedeOnUserComment: true } });
+    await expect(issuesSvc.update(f.issueId, { status: "in_progress" })).resolves.toMatchObject({ status: "in_progress" });
+  });
+
+  it("turns assigned todo into a wait without overwriting existing review or manual blockers", async () => {
+    const f = await seedInputWait();
+    await db.update(issues).set({ status: "todo", checkoutRunId: null, executionRunId: null }).where(eq(issues.id, f.issueId));
+    await interactionsSvc.create(f.issue, f.input, f.actor);
+    expect((await f.read()).status).toBe("blocked");
+  });
+
+  it.each(["in_review", "blocked"])("preserves an existing %s disposition and never invents a restoration receipt", async (status) => {
+    const f = await seedInputWait();
+    await db.update(issues).set({ status }).where(eq(issues.id, f.issueId));
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    expect(await f.read()).toMatchObject({ status, unblockDescriptor: null });
+    await interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" });
+    expect((await f.read()).status).toBe(status);
+  });
+
+  it("restores an owned wait once and exposes one durable continuation claim", async () => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const outcomes = await Promise.allSettled([
+      interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" }),
+      interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" }),
+    ]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const answered = await interactionsSvc.getById(created.id);
+    expect(answered?.result).toMatchObject({ workContinuationKey: created.id });
+    expect(await f.read()).toMatchObject({ status: "in_progress", assigneeAgentId: f.executorId, unblockDescriptor: null, executionRunId: f.runId });
+    const resolutions = await db.select().from(activityLog).where(eq(activityLog.action, "issue.input_wait_resolved"));
+    expect(resolutions).toHaveLength(1);
+  });
+
+  it("coalesces duplicate create retries without duplicate pending requests or version changes", async () => {
+    const f = await seedInputWait();
+    const results = await Promise.all([
+      interactionsSvc.create(f.issue, f.input, f.actor),
+      interactionsSvc.create(f.issue, f.input, f.actor),
+    ]);
+    expect(results[0].id).toBe(results[1].id);
+    const before = await f.read();
+    await interactionsSvc.create(f.issue, f.input, f.actor);
+    expect((await f.read()).statusVersion).toBe(before.statusVersion);
+    expect(await interactionsSvc.listForIssue(f.issueId)).toHaveLength(1);
+  });
+
+  it("two concurrently answered required inputs produce only one wait-episode continuation claim", async () => {
+    const f = await seedInputWait();
+    const first = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const second = await interactionsSvc.create(f.issue, { ...f.input, idempotencyKey: "source-v2", title: "Provide design" }, f.actor);
+    expect((await interactionsSvc.listForIssue(f.issueId)).filter((row) => row.status === "pending")).toHaveLength(2);
+    const answered = await Promise.all([
+      interactionsSvc.answerQuestions(f.issue, first.id, f.answer, { userId: "board" }),
+      interactionsSvc.answerQuestions(f.issue, second.id, f.answer, { userId: "board" }),
+    ]);
+    expect(answered.filter((row) => row.kind === "ask_user_questions" && typeof row.result?.workContinuationKey === "string")).toHaveLength(1);
+    expect(answered.filter((row) => row.kind === "ask_user_questions" && row.result?.workContinuationKey === false)).toHaveLength(1);
+    expect((await f.read()).status).toBe("in_progress");
+  });
+
+  it("holds until the final required answer and an optional question cannot supersede that hold", async () => {
+    const f = await seedInputWait();
+    const first = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const second = await interactionsSvc.create(f.issue, { ...f.input, idempotencyKey: "design-v1" }, f.actor);
+    await interactionsSvc.create(f.issue, { ...f.input, idempotencyKey: "optional-v1", payload: { ...f.input.payload, blocksWork: false } }, f.actor);
+    const answered = await interactionsSvc.answerQuestions(f.issue, first.id, f.answer, { userId: "board" });
+    expect(answered.result).toMatchObject({ workContinuationKey: false });
+    expect((await f.read()).status).toBe("blocked");
+    await interactionsSvc.answerQuestions(f.issue, second.id, f.answer, { userId: "board" });
+    expect((await f.read()).status).toBe("in_progress");
+  });
+
+  it.each([undefined, true, false])("ordinary comments cannot supersede required input (supersedeOnUserComment=%s)", async (supersedeOnUserComment) => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, { ...f.input, payload: { ...f.input.payload, supersedeOnUserComment } }, f.actor);
+    // Include legacy explicitly true rows as well as freshly normalised values.
+    await db.update(issueThreadInteractions).set({ payload: { ...f.input.payload, supersedeOnUserComment: true } }).where(eq(issueThreadInteractions.id, created.id));
+    const [comment] = await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId, body: "Audit correction: waiting for internal source", authorUserId: "board", createdAt: new Date(Date.now() + 1000) }).returning();
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment(f.issue, comment, { userId: "board" });
+    expect(expired).toHaveLength(0);
+    expect((await interactionsSvc.getById(created.id))?.status).toBe("pending");
+    expect((await f.read()).status).toBe("blocked");
+    await expect(issuesSvc.update(f.issueId, { status: "todo" })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("manual reblocking and reassignment invalidate automatic restoration", async () => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const waitVersion = (await f.read()).statusVersion;
+    await issuesSvc.update(f.issueId, { status: "blocked", assigneeAgentId: f.managerId });
+    expect((await f.read()).statusVersion).toBeGreaterThan(waitVersion);
+    const answered = await interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" });
+    expect(answered.result).toMatchObject({ workContinuationKey: false });
+    expect(await f.read()).toMatchObject({ status: "blocked", assigneeAgentId: f.managerId });
+  });
+
+  it("a terminal status change wins over an answer using a stale issue snapshot", async () => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.issueId));
+    await expect(interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" })).rejects.toMatchObject({ status: 409 });
+    expect((await f.read()).status).toBe("cancelled");
+  });
+
+  it("serialises required-input creation with checkout and concurrent work-start updates", async () => {
+    const f = await seedInputWait();
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, f.runId));
+    const outcomes = await Promise.allSettled([
+      interactionsSvc.create(f.issue, f.input, f.actor),
+      issuesSvc.checkout(f.issueId, f.executorId, ["in_progress", "blocked"], null),
+      issuesSvc.update(f.issueId, { status: "in_progress" }),
+    ]);
+    expect(outcomes[0].status).toBe("fulfilled");
+    expect((await f.read()).status).toBe("blocked");
+    await expect(issuesSvc.checkout(f.issueId, f.executorId, ["blocked"], null)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("legacy successful-run mismatch reconciles to an owned wait, with optional questions excluded", async () => {
+    const { synchronizeIssueInputWait } = await import("../services/issue-input-wait.js");
+    const f = await seedInputWait();
+    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+      kind: "ask_user_questions", continuationPolicy: "wake_assignee", payload: f.input.payload,
+      createdByAgentId: f.executorId,
+    });
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, f.runId));
+    const addressed: unknown[] = [];
+    await db.transaction(async (tx) => { await synchronizeIssueInputWait(tx as unknown as typeof db, f.companyId, f.issueId, { addressedInteractions: addressed as never[] }); });
+    await db.transaction(async (tx) => { await synchronizeIssueInputWait(tx as unknown as typeof db, f.companyId, f.issueId, { addressedInteractions: addressed as never[] }); });
+    expect(addressed).toHaveLength(1);
+    expect(addressed[0]).toMatchObject({ addresseeAgentId: f.managerId });
+    expect(await f.read()).toMatchObject({ status: "blocked", unblockDescriptor: { owner: { agentId: f.managerId } } });
+  });
+
+  it("skipping required input leaves a truthful parked state until new instructions", async () => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const skipped = await interactionsSvc.skipInteraction(f.issue, created.id, {}, { userId: "board" });
+    expect(skipped.result).toMatchObject({ workContinuationKey: false });
+    expect(await f.read()).toMatchObject({ status: "blocked", unblockDescriptor: { owner: { agentId: f.managerId } } });
+    expect((await f.read()).unblockDescriptor?.interactionWait).toBeUndefined();
+  });
+
+  it("releases the linked implementation-stage lease when required input blocks work", async () => {
+    const f = await seedInputWait();
+    const pipelineId = randomUUID(), stageId = randomUUID(), caseId = randomUUID(), eventId = randomUUID(), routineId = randomUUID(), attemptId = randomUUID();
+    await db.insert(pipelines).values({ id: pipelineId, companyId: f.companyId, key: "delivery", name: "Delivery" });
+    await db.insert(pipelineStages).values({ id: stageId, pipelineId, key: "implementation", name: "Implementation", kind: "working", position: 1 });
+    await db.insert(pipelineCases).values({ id: caseId, companyId: f.companyId, pipelineId, stageId, caseKey: "receipt", title: "Receipt", leaseToken: randomUUID(), leaseAgentId: f.executorId, leaseOwnerType: "agent", leaseExpiresAt: new Date(Date.now() + 60000) });
+    await db.insert(pipelineCaseEvents).values({ id: eventId, companyId: f.companyId, caseId, type: "transitioned", actorType: "system", toStageId: stageId });
+    await db.insert(routines).values({ id: routineId, companyId: f.companyId, title: "Implement", assigneeAgentId: f.executorId });
+    await db.insert(pipelineAutomationExecutions).values({ id: attemptId, companyId: f.companyId, caseId, automationId: "implementation", triggeringEventId: eventId, routineId, status: "succeeded", executionIssueId: f.issueId });
+    await db.insert(pipelineCaseIssueLinks).values({ companyId: f.companyId, caseId, issueId: f.issueId, role: "automation", automationAttemptId: attemptId });
+    await interactionsSvc.create(f.issue, f.input, f.actor);
+    const [updated] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, caseId));
+    expect(updated).toMatchObject({ leaseToken: null, leaseAgentId: null, leaseOwnerType: null });
+    expect((await f.read()).executionRunId).toBe(f.runId);
+    expect(await db.select().from(pipelineCaseEvents).where(eq(pipelineCaseEvents.type, "lease_released"))).toHaveLength(1);
+  });
+
+  it.each(["dependency", "pause", "paused_executor"])("commits an authoritative answer while preserving the %s execution gate", async (gate) => {
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    if (gate === "dependency") {
+      const blockerId = randomUUID();
+      await db.insert(issues).values({ id: blockerId, companyId: f.companyId, goalId: f.goalId, title: "Upstream", status: "todo" });
+      await db.insert(issueRelations).values({ companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks" });
+    } else if (gate === "pause") {
+      await db.insert(issueTreeHolds).values({ companyId: f.companyId, rootIssueId: f.issueId, mode: "pause" });
+    } else {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.executorId));
+    }
+    const answered = await interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" });
+    expect(answered).toMatchObject({ status: "answered", result: { workContinuationKey: false } });
+    expect((await f.read()).status).toBe("blocked");
+  });
+
+  it.each(["reblock", "reassign", "terminal"])("a concurrent external %s defeats any stale input continuation", async (change) => {
+    const { inputWaitContinuationIsCurrent } = await import("../services/issue-input-wait.js");
+    const f = await seedInputWait();
+    const created = await interactionsSvc.create(f.issue, f.input, f.actor);
+    const outcomes = await Promise.allSettled([
+      interactionsSvc.answerQuestions(f.issue, created.id, f.answer, { userId: "board" }),
+      issuesSvc.update(f.issueId, change === "reblock" ? { status: "blocked" }
+        : change === "reassign" ? { assigneeAgentId: f.managerId } : { status: "cancelled" }),
+    ]);
+    expect(outcomes[1].status).toBe("fulfilled");
+    const current = await f.read();
+    if (change === "reblock") expect(current.status).toBe("blocked");
+    if (change === "reassign") expect(current.assigneeAgentId).toBe(f.managerId);
+    if (change === "terminal") expect(current.status).toBe("cancelled");
+    const answered = await interactionsSvc.getById(created.id);
+    if (answered?.status === "answered") expect(inputWaitContinuationIsCurrent(answered.result, current)).toBe(false);
+  });
+
 });

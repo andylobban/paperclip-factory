@@ -2,6 +2,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockHasRequiredInput = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("../services/issue-input-wait.js", () => ({ hasRequiredInput: mockHasRequiredInput, inputWaitContinuationIsCurrent: () => true, inputWaitContinuationReceipt: () => null }));
+
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const UNRELATED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
 const CREATED_AGENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -327,6 +330,7 @@ describe.sequential("issue thread interaction routes", () => {
     // queue. That gap once let a leftover queued value deny an unrelated
     // later test.
     vi.resetAllMocks();
+    mockHasRequiredInput.mockResolvedValue(false);
     // mockRunAttribution.value is a plain object, not a vi.fn().
     // resetAllMocks() does not reset it. createApp() overwrites it for an
     // agent actor. A board actor leaves whatever value a prior test set here.
@@ -1885,6 +1889,7 @@ describe.sequential("issue thread interaction routes", () => {
       assigneeAgentId: null,
       assigneeUserId: "local-board",
     }));
+    mockIssueService.getById.mockResolvedValue(createIssue({ assigneeAgentId: CREATED_AGENT_ID, status: "todo" }));
     mockInteractionService.acceptInteraction.mockResolvedValueOnce({
       interaction: {
         id: "interaction-4",

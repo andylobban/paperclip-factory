@@ -129,6 +129,8 @@ export type StalenessDecision =
     };
 
 export type QueuedRunFacts = {
+  hasRequiredInput?: boolean;
+  inputWaitContinuationCurrent?: boolean;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
   runId: string;
@@ -503,6 +505,13 @@ export function decideQueuedRunStaleness(
       reason: "Cancelled because the target issue no longer exists",
       details: { issueId: facts.issueId },
     };
+  }
+
+  if (facts.inputWaitContinuationCurrent === false) {
+    return { stale: true, errorCode: "issue_blocked", reason: "Cancelled because the input wait continuation disposition changed", details: { issueId: facts.issueId } };
+  }
+  if (facts.hasRequiredInput && facts.issueAssigneeAgentId === facts.runAgentId) {
+    return { stale: true, errorCode: "issue_blocked", reason: "Cancelled because required input remains unresolved", details: { issueId: facts.issueId } };
   }
 
   if (facts.isResolvedInteractionContinuation || facts.isConnectionContinuation) {

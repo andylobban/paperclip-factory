@@ -2,6 +2,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockHasRequiredInput = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("../services/issue-input-wait.js", () => ({ hasRequiredInput: mockHasRequiredInput, inputWaitContinuationIsCurrent: () => true, inputWaitContinuationReceipt: () => null }));
+
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const PREVIOUS_AGENT_ID = "22222222-2222-4222-8222-222222222222";
 const MENTIONED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -251,6 +254,7 @@ function makeIssue(overrides: Record<string, unknown> = {}) {
 
 describe("issue update comment wakeups", () => {
   beforeEach(() => {
+    mockHasRequiredInput.mockResolvedValue(false);
     vi.resetModules();
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../routes/authz.js");
@@ -979,4 +983,19 @@ describe("issue update comment wakeups", () => {
       }),
     );
   });
+  it.each(["patch", "comment"])("AND-955: a routine %s comment cannot restart unresolved input", async (kind) => {
+    const existing = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked" });
+    mockHasRequiredInput.mockResolvedValue(true);
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({ id: "audit-comment", companyId: existing.companyId, issueId: existing.id, body: "Internal input is being routed" });
+    const app = await createApp();
+    const response = kind === "patch"
+      ? await request(app).patch(`/api/issues/${existing.id}`).send({ status: "blocked", comment: "Internal input is being routed" })
+      : await request(app).post(`/api/issues/${existing.id}/comments`).send({ body: "Internal input is being routed" });
+    expect(response.status).toBe(kind === "patch" ? 200 : 201);
+    await vi.waitFor(() => expect(mockHasRequiredInput).toHaveBeenCalled());
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
 });

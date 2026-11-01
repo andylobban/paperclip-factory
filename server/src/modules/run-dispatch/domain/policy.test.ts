@@ -532,3 +532,26 @@ describe("AI subscription wait ownership", () => {
       .toMatchObject({ stale: true, errorCode: "issue_execution_lock_changed" });
   });
 });
+
+
+describe("required-input dispatch arbitration", () => {
+  it("cancels an assignee comment wake that raced with required input creation", () => {
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), hasRequiredInput: true,
+      issueStatus: "blocked", wakeReason: "issue_commented", wakeCommentIdPresent: true }, NOW))
+      .toMatchObject({ stale: true, errorCode: "issue_blocked" });
+  });
+  it("allows an addressed specialist response without changing executor ownership", () => {
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), hasRequiredInput: true,
+      issueStatus: "blocked", issueAssigneeAgentId: "executor", isInteractionWake: true,
+      wakeReason: "interaction_pending" }, NOW)).toEqual({ stale: false });
+  });
+  it("suppresses a resolved-question continuation if another required input remains", () => {
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), hasRequiredInput: true,
+      isResolvedInteractionContinuation: true }, NOW)).toMatchObject({ stale: true, errorCode: "issue_blocked" });
+  });
+  it("rejects an input continuation when an intervening status version invalidates its receipt", () => {
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), isResolvedInteractionContinuation: true,
+      inputWaitContinuationCurrent: false }, NOW)).toMatchObject({ stale: true, errorCode: "issue_blocked" });
+  });
+
+});

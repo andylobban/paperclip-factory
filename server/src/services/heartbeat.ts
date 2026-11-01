@@ -1,3 +1,4 @@
+import { requiredInputCondition, synchronizeIssueInputWait } from "./issue-input-wait.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
 import { settleSlackConversation } from "./slack-conversation-lifecycle.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
@@ -362,6 +363,8 @@ import {
 } from "./issue-rewake-throttle.js";
 import {
   logActivity,
+  publishActivity,
+  type ActivityPublication,
   publishPluginDomainEvent,
   type LogActivityInput,
 } from "./activity-log.js";
@@ -13339,6 +13342,25 @@ export function heartbeatService(
       if (goalProjection?.goal?.status !== "complete") return;
     }
 
+    const inputWaitPublications: ActivityPublication[] = [];
+    const inputWaitAddressees: (typeof issueThreadInteractions.$inferSelect)[] = [];
+    await db.transaction(async (tx) => {
+      await synchronizeIssueInputWait(tx as unknown as Db, run.companyId, issueId, {
+        activityPublications: inputWaitPublications, addressedInteractions: inputWaitAddressees,
+      });
+    });
+    for (const publication of inputWaitPublications) publishActivity(publication);
+    for (const interaction of inputWaitAddressees) {
+      if (!interaction.addresseeAgentId) continue;
+      void trackWakeup(interaction.addresseeAgentId, {
+        source: "automation", triggerDetail: "system", reason: "interaction_pending",
+        idempotencyKey: `interaction-pending:${interaction.id}`,
+        requestedByActorType: "system", requestedByActorId: "required-input",
+        payload: { issueId, interactionId: interaction.id, interactionKind: interaction.kind, mutation: "interaction" },
+        contextSnapshot: { issueId, taskId: issueId, interactionId: interaction.id, interactionKind: interaction.kind,
+          wakeReason: "interaction_pending", source: "required_input_reconciliation" },
+      }).catch((err) => logger.warn({ err, issueId, interactionId: interaction.id }, "failed to wake required-input responder"));
+    }
     const issue = await db
       .select({
         id: issues.id,
@@ -13448,7 +13470,7 @@ export function heartbeatService(
               and(
                 eq(issueThreadInteractions.companyId, issue.companyId),
                 eq(issueThreadInteractions.issueId, issue.id),
-                eq(issueThreadInteractions.status, "pending"),
+                or(requiredInputCondition(), and(ne(issueThreadInteractions.kind, "ask_user_questions"), eq(issueThreadInteractions.status, "pending"))),
               ),
             )
             .limit(1)

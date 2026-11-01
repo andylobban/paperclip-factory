@@ -1,3 +1,4 @@
+import { assertNoRequiredInput } from "./issue-input-wait.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
@@ -7431,8 +7432,8 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
     expectedCheckoutRunId: string;
-  }) {
-    return db.transaction(async (tx) => {
+  }, dbOrTx: Db = db) {
+    return dbOrTx.transaction(async (tx) => {
       const lockedIssue = await tx
         .select({
           id: issues.id,
@@ -10552,7 +10553,7 @@ export function issueService(db: Db) {
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
       postCommitActions?: IssuePostCommitAction[],
-      options: { bindRuntimeSharedWorkspace?: boolean } = {},
+      options: { bindRuntimeSharedWorkspace?: boolean; preserveExecutionForInputWait?: boolean } = {},
     ) => {
       const ownedActivityPublications: ActivityPublication[] = [];
       const activityPublications =
@@ -10835,7 +10836,8 @@ export function issueService(db: Db) {
       if (issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
       }
-      if (issueData.status && issueData.status !== "in_progress") {
+      if (issueData.status && issueData.status !== "in_progress" &&
+          !(options.preserveExecutionForInputWait && issueData.status === "blocked" && issueData.unblockDescriptor?.interactionWait)) {
         patch.checkoutRunId = null;
         patch.executionRunId = null;
         patch.executionAgentNameKey = null;
@@ -10869,6 +10871,9 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (patch.status === "in_progress" || patch.status === "todo") {
+          await assertNoRequiredInput(tx, receiptExisting.companyId, id);
+        }
         const descendantStatusChanging =
           patch.status !== undefined && patch.status !== receiptExisting.status;
         const parentChanging =
@@ -11569,214 +11574,218 @@ export function issueService(db: Db) {
       await clearExecutionRunIfTerminal(id);
       await clearCheckoutRunIfTerminal(id);
 
-      const dependencyReadiness = await listIssueDependencyReadinessMap(
-        db,
-        issueCompany.companyId,
-        [id],
-      );
-      const readiness = dependencyReadiness.get(id);
-      const unresolvedBlockerIssueIds =
-        readiness?.unresolvedBlockerIssueIds ?? [];
-      if (unresolvedBlockerIssueIds.length > 0) {
-        const unresolvedBlockers = await listUnresolvedBlockerDetails(
-          db,
+      return db.transaction(async (checkoutDb) => {
+        await checkoutDb.select({ id: issues.id }).from(issues).where(eq(issues.id, id)).for("update");
+        await assertNoRequiredInput(checkoutDb as unknown as Db, issueCompany.companyId, id);
+        const dependencyReadiness = await listIssueDependencyReadinessMap(
+          checkoutDb,
           issueCompany.companyId,
-          unresolvedBlockerIssueIds,
-          readiness?.pendingFinalizeBlockerIssueIds,
+          [id],
         );
-        throw unprocessable("Issue is blocked by unresolved blockers", {
-          unresolvedBlockerIssueIds,
-          unresolvedBlockers,
-        });
-      }
-
-      const sameRunAssigneeCondition = checkoutRunId
-        ? and(
-            eq(issues.assigneeAgentId, agentId),
-            or(
-              isNull(issues.checkoutRunId),
-              eq(issues.checkoutRunId, checkoutRunId),
-            ),
-          )
-        : and(
-            eq(issues.assigneeAgentId, agentId),
-            isNull(issues.checkoutRunId),
+        const readiness = dependencyReadiness.get(id);
+        const unresolvedBlockerIssueIds =
+          readiness?.unresolvedBlockerIssueIds ?? [];
+        if (unresolvedBlockerIssueIds.length > 0) {
+          const unresolvedBlockers = await listUnresolvedBlockerDetails(
+            checkoutDb,
+            issueCompany.companyId,
+            unresolvedBlockerIssueIds,
+            readiness?.pendingFinalizeBlockerIssueIds,
           );
-      const executionLockCondition = checkoutRunId
-        ? or(
-            isNull(issues.executionRunId),
-            eq(issues.executionRunId, checkoutRunId),
-          )
-        : isNull(issues.executionRunId);
-      const updated = await db
-        .update(issues)
-        .set({
-          assigneeAgentId: agentId,
-          assigneeUserId: null,
-          checkoutRunId,
-          executionRunId: checkoutRunId,
-          status: "in_progress",
-          startedAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(issues.id, id),
-            inArray(issues.status, expectedStatuses),
-            or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
-            executionLockCondition,
-          ),
-        )
-        .returning()
-        .then((rows) => rows[0] ?? null);
+          throw unprocessable("Issue is blocked by unresolved blockers", {
+            unresolvedBlockerIssueIds,
+            unresolvedBlockers,
+          });
+        }
 
-      if (updated) {
-        const [enriched] = await withIssueLabels(db, [updated]);
-        return enriched;
-      }
-
-      const current = await db
-        .select({
-          id: issues.id,
-          status: issues.status,
-          assigneeAgentId: issues.assigneeAgentId,
-          checkoutRunId: issues.checkoutRunId,
-          executionRunId: issues.executionRunId,
-        })
-        .from(issues)
-        .where(eq(issues.id, id))
-        .then((rows) => rows[0] ?? null);
-
-      if (!current) throw notFound("Issue not found");
-
-      if (
-        current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
-        current.checkoutRunId == null &&
-        (current.executionRunId == null ||
-          current.executionRunId === checkoutRunId) &&
-        checkoutRunId
-      ) {
-        const adopted = await db
+        const sameRunAssigneeCondition = checkoutRunId
+          ? and(
+              eq(issues.assigneeAgentId, agentId),
+              or(
+                isNull(issues.checkoutRunId),
+                eq(issues.checkoutRunId, checkoutRunId),
+              ),
+            )
+          : and(
+              eq(issues.assigneeAgentId, agentId),
+              isNull(issues.checkoutRunId),
+            );
+        const executionLockCondition = checkoutRunId
+          ? or(
+              isNull(issues.executionRunId),
+              eq(issues.executionRunId, checkoutRunId),
+            )
+          : isNull(issues.executionRunId);
+        const updated = await checkoutDb
           .update(issues)
           .set({
+            assigneeAgentId: agentId,
+            assigneeUserId: null,
             checkoutRunId,
             executionRunId: checkoutRunId,
-            updatedAt: new Date(),
+            status: "in_progress",
+            startedAt: now,
+            updatedAt: now,
           })
           .where(
             and(
               eq(issues.id, id),
-              eq(issues.status, "in_progress"),
-              eq(issues.assigneeAgentId, agentId),
-              isNull(issues.checkoutRunId),
-              or(
-                isNull(issues.executionRunId),
-                eq(issues.executionRunId, checkoutRunId),
-              ),
+              inArray(issues.status, expectedStatuses),
+              or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
+              executionLockCondition,
             ),
           )
           .returning()
           .then((rows) => rows[0] ?? null);
-        if (adopted) return adopted;
-      }
 
-      if (
-        checkoutRunId &&
-        current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
-        current.checkoutRunId &&
-        current.checkoutRunId !== checkoutRunId
-      ) {
-        const staleAdoption = await adoptStaleCheckoutRun({
-          issueId: id,
-          actorAgentId: agentId,
-          actorRunId: checkoutRunId,
-          expectedCheckoutRunId: current.checkoutRunId,
-        });
-        if (staleAdoption.adopted) {
-          const row = await db
-            .select()
-            .from(issues)
-            .where(eq(issues.id, id))
-            .then((rows) => rows[0] ?? null);
-          if (!row) throw notFound("Issue not found");
-          const [enriched] = await withIssueLabels(db, [row]);
+        if (updated) {
+          const [enriched] = await withIssueLabels(checkoutDb, [updated]);
           return enriched;
         }
-      }
 
-      // Adopt stale executionRunId — if the execution lock points to a terminal/missing run, clear it and proceed.
-      // Only adopts when the caller's expectedStatuses guard still holds; preserves any existing assigneeUserId
-      // and preserves the original startedAt when the issue is already in_progress.
-      if (
-        checkoutRunId &&
-        current.executionRunId &&
-        current.executionRunId !== checkoutRunId &&
-        (current.assigneeAgentId === agentId || current.assigneeAgentId == null)
-      ) {
-        const stale = await isTerminalOrMissingHeartbeatRun(
-          current.executionRunId,
-        );
-        if (stale) {
-          const now = new Date();
-          const adoptionSet: Record<string, unknown> = {
-            assigneeAgentId: agentId,
-            checkoutRunId,
-            executionRunId: checkoutRunId,
-            executionAgentNameKey: null,
-            executionLockedAt: now,
-            status: "in_progress",
-            updatedAt: now,
-          };
-          if (current.status !== "in_progress") {
-            adoptionSet.startedAt = now;
-          }
-          const adopted = await db
+        const current = await checkoutDb
+          .select({
+            id: issues.id,
+            status: issues.status,
+            assigneeAgentId: issues.assigneeAgentId,
+            checkoutRunId: issues.checkoutRunId,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+
+        if (!current) throw notFound("Issue not found");
+
+        if (
+          current.assigneeAgentId === agentId &&
+          current.status === "in_progress" &&
+          current.checkoutRunId == null &&
+          (current.executionRunId == null ||
+            current.executionRunId === checkoutRunId) &&
+          checkoutRunId
+        ) {
+          const adopted = await checkoutDb
             .update(issues)
-            .set(adoptionSet)
+            .set({
+              checkoutRunId,
+              executionRunId: checkoutRunId,
+              updatedAt: new Date(),
+            })
             .where(
               and(
                 eq(issues.id, id),
-                inArray(issues.status, expectedStatuses),
-                eq(issues.executionRunId, current.executionRunId),
+                eq(issues.status, "in_progress"),
+                eq(issues.assigneeAgentId, agentId),
+                isNull(issues.checkoutRunId),
                 or(
-                  isNull(issues.assigneeAgentId),
-                  eq(issues.assigneeAgentId, agentId),
+                  isNull(issues.executionRunId),
+                  eq(issues.executionRunId, checkoutRunId),
                 ),
               ),
             )
             .returning()
             .then((rows) => rows[0] ?? null);
-          if (adopted) {
-            const [enriched] = await withIssueLabels(db, [adopted]);
+          if (adopted) return adopted;
+        }
+
+        if (
+          checkoutRunId &&
+          current.assigneeAgentId === agentId &&
+          current.status === "in_progress" &&
+          current.checkoutRunId &&
+          current.checkoutRunId !== checkoutRunId
+        ) {
+          const staleAdoption = await adoptStaleCheckoutRun({
+            issueId: id,
+            actorAgentId: agentId,
+            actorRunId: checkoutRunId,
+            expectedCheckoutRunId: current.checkoutRunId,
+          }, checkoutDb as unknown as Db);
+          if (staleAdoption.adopted) {
+            const row = await checkoutDb
+              .select()
+              .from(issues)
+              .where(eq(issues.id, id))
+              .then((rows) => rows[0] ?? null);
+            if (!row) throw notFound("Issue not found");
+            const [enriched] = await withIssueLabels(checkoutDb, [row]);
             return enriched;
           }
         }
-      }
 
-      // If this run already owns it and it's in_progress, return it (no self-409)
-      if (
-        current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
-        sameRunLock(current.checkoutRunId, checkoutRunId)
-      ) {
-        const row = await db
-          .select()
-          .from(issues)
-          .where(eq(issues.id, id))
-          .then((rows) => rows[0] ?? null);
-        if (!row) throw notFound("Issue not found");
-        const [enriched] = await withIssueLabels(db, [row]);
-        return enriched;
-      }
+        // Adopt stale executionRunId — if the execution lock points to a terminal/missing run, clear it and proceed.
+        // Only adopts when the caller's expectedStatuses guard still holds; preserves any existing assigneeUserId
+        // and preserves the original startedAt when the issue is already in_progress.
+        if (
+          checkoutRunId &&
+          current.executionRunId &&
+          current.executionRunId !== checkoutRunId &&
+          (current.assigneeAgentId === agentId || current.assigneeAgentId == null)
+        ) {
+          const stale = await isTerminalOrMissingHeartbeatRun(
+            current.executionRunId,
+          );
+          if (stale) {
+            const now = new Date();
+            const adoptionSet: Record<string, unknown> = {
+              assigneeAgentId: agentId,
+              checkoutRunId,
+              executionRunId: checkoutRunId,
+              executionAgentNameKey: null,
+              executionLockedAt: now,
+              status: "in_progress",
+              updatedAt: now,
+            };
+            if (current.status !== "in_progress") {
+              adoptionSet.startedAt = now;
+            }
+            const adopted = await checkoutDb
+              .update(issues)
+              .set(adoptionSet)
+              .where(
+                and(
+                  eq(issues.id, id),
+                  inArray(issues.status, expectedStatuses),
+                  eq(issues.executionRunId, current.executionRunId),
+                  or(
+                    isNull(issues.assigneeAgentId),
+                    eq(issues.assigneeAgentId, agentId),
+                  ),
+                ),
+              )
+              .returning()
+              .then((rows) => rows[0] ?? null);
+            if (adopted) {
+              const [enriched] = await withIssueLabels(checkoutDb, [adopted]);
+              return enriched;
+            }
+          }
+        }
 
-      throw conflict("Issue checkout conflict", {
-        issueId: current.id,
-        status: current.status,
-        assigneeAgentId: current.assigneeAgentId,
-        checkoutRunId: current.checkoutRunId,
-        executionRunId: current.executionRunId,
+        // If this run already owns it and it's in_progress, return it (no self-409)
+        if (
+          current.assigneeAgentId === agentId &&
+          current.status === "in_progress" &&
+          sameRunLock(current.checkoutRunId, checkoutRunId)
+        ) {
+          const row = await checkoutDb
+            .select()
+            .from(issues)
+            .where(eq(issues.id, id))
+            .then((rows) => rows[0] ?? null);
+          if (!row) throw notFound("Issue not found");
+          const [enriched] = await withIssueLabels(checkoutDb, [row]);
+          return enriched;
+        }
+
+        throw conflict("Issue checkout conflict", {
+          issueId: current.id,
+          status: current.status,
+          assigneeAgentId: current.assigneeAgentId,
+          checkoutRunId: current.checkoutRunId,
+          executionRunId: current.executionRunId,
+        });
       });
     },
 

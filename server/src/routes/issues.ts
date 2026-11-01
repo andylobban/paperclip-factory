@@ -1,3 +1,4 @@
+import { hasRequiredInput, inputWaitContinuationIsCurrent, inputWaitContinuationReceipt } from "../services/issue-input-wait.js";
 import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
@@ -2606,8 +2607,15 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
 }) {
-  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status))
-    return;
+  const workContinuationKey = readObject(input.interaction.result).workContinuationKey;
+  const inputWaitContinuation = inputWaitContinuationReceipt(input.interaction.result);
+  if (workContinuationKey === false) return;
+  const currentIssue = await issueService(input.db).getById(input.issue.id);
+  if (!currentIssue || currentIssue.companyId !== input.issue.companyId) return;
+  if (!inputWaitContinuationIsCurrent(input.interaction.result, currentIssue)) return;
+  input = { ...input, issue: currentIssue };
+  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status) || input.issue.status === "blocked") return;
+  if (await hasRequiredInput(input.db, input.issue.companyId, input.issue.id)) return;
 
   const reviewPathLost =
     input.issue.status === "in_review" &&
@@ -2752,6 +2760,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         interactionId: input.interaction.id,
         interactionKind: input.interaction.kind,
         interactionStatus: input.interaction.status,
+        ...(inputWaitContinuation ? { inputWaitContinuation } : {}),
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
@@ -2768,7 +2777,8 @@ async function queueResolvedInteractionContinuationWakeup(input: {
       },
       idempotencyKey:
         input.idempotencyKey ??
-        `interaction:${input.interaction.id}:${input.interaction.status}`,
+        (typeof workContinuationKey === "string" ? `question-response:${workContinuationKey}` :
+        `interaction:${input.interaction.id}:${input.interaction.status}`),
       allowRunCoalescing: !hasExternalPromptBinding,
       requestedByActorType: input.actor.actorType,
       requestedByActorId: input.actor.actorId,
@@ -2778,6 +2788,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         interactionId: input.interaction.id,
         interactionKind: input.interaction.kind,
         interactionStatus: input.interaction.status,
+        ...(inputWaitContinuation ? { inputWaitContinuation } : {}),
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
@@ -14951,6 +14962,7 @@ export function issueRoutes(
               issueAtCommentStart: existing,
               reopened,
               currentStatus: issue.status,
+              hasRequiredInput: await hasRequiredInput(db, issue.companyId, issue.id),
             });
 
           if (
@@ -18356,6 +18368,7 @@ export function issueRoutes(
           issueAtCommentStart: issue,
           reopened,
           currentStatus: wakeIssueSnapshot.status,
+          hasRequiredInput: await hasRequiredInput(db, wakeIssueSnapshot.companyId, wakeIssueSnapshot.id),
         });
         if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment) {
           if (reopened) {

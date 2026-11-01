@@ -61,4 +61,9 @@ describe("shouldWakeAssigneeForIssueComment", () => {
       true,
     );
   });
+  it.each(["blocked", "in_progress", "todo"])("does not restart %s work while required input remains", (currentStatus) => {
+    expect(shouldWakeAssigneeForIssueComment({ selfComment: false, resumeRequested: false,
+      issueAtCommentStart: {}, reopened: false, currentStatus, hasRequiredInput: true })).toBe(false);
+  });
+
 });

@@ -1441,3 +1441,46 @@ Contracts reference the existing brief and answers instead of copying them again
 Resumed sessions keep the existing message-delta path; fresh sessions receive the
 full covered history. Stable wording and bounded references avoid adding another
 full brief on each comment, but provider cache hits must be measured separately.
+
+## Required input and optional questions
+
+`ask_user_questions.payload.blocksWork` describes whether an unanswered question
+prevents execution. Set it to `true` for a required prerequisite and `false` for
+optional consultation. A question may require an answer when the form is submitted
+while still allowing other issue work: individual `questions[].required` flags are
+form constraints, and explicit `blocksWork: false` takes precedence over them.
+For legacy requests without `blocksWork`, a question set containing a question
+whose `required` flag is true or omitted blocks work when its continuation policy
+is not `none`. Explicit work-blocking requests must declare a continuation.
+
+Name the responsible responder with `addresseeAgentId` or `addresseeUserId`.
+Unaddressed agent-created required questions route to the creator's manager when
+the resolver policy permits an agent response. Human-only governance remains
+human-only. The executor remains assigned to the issue; responding as a specialist
+does not transfer execution ownership.
+
+Creating required input on assigned executable work changes it to `blocked` in the
+same issue-locked transaction. The unblock descriptor identifies the responder
+and action. Existing manual blockers and review dispositions remain authoritative.
+Ordinary comments cannot expire required questions, even for historical cards with
+`supersedeOnUserComment: true`, and cannot restart the waiting executor. Required
+questions remain pending until an authoritative answer, explicit withdrawal or
+cancellation, or issue termination. Independent required questions coexist;
+optional question replacement cannot discharge them.
+
+A server-owned wait receipt records the issue status version and executor owner.
+The final required resolution restores only that unchanged receipt, after checking
+other dependency and pause gates. Manual reblocking, reassignment, closure or a
+newer disposition prevents automatic restoration. Only the transaction that
+restores the receipt obtains the wait episode's continuation claim; concurrent
+answers and request retries cannot create another continuation for that episode.
+Existing approval, recovery and independent review policies still apply.
+
+Required input that is explicitly skipped remains parked with an accountable
+request for replacement instructions; skipping does not claim a continuation.
+Authoritative answers stay saved when another dependency, pause hold, executor
+availability or budget gate prevents resumption. The question response outbox
+uses the same wait-episode claim and carries its status-version/owner receipt to
+final dispatch, where concurrent manual decisions are checked again under lock.
+Legacy unaddressed internal waits are reconciled to an eligible manager with the
+same resolver-policy checks and idempotent attention wake used for new requests.

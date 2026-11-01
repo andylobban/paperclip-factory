@@ -3,6 +3,12 @@ import { getTableName } from "drizzle-orm";
 
 const mockCreateChild = vi.fn();
 
+vi.mock("./issue-input-wait.js", async (original) => ({
+  ...await original<typeof import("./issue-input-wait.js")>(),
+  lockInputIssue: async () => ({ status: "in_progress", unblockDescriptor: null }),
+  synchronizeIssueInputWait: async () => undefined,
+}));
+
 vi.mock("./issues.js", () => ({
   issueService: () => ({
     createChild: mockCreateChild,
